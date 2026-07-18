@@ -1,3 +1,0 @@
-"C:\Program Files\CMake\bin\cmake.exe" -E rm -f CMakeFiles\guvenlik_merkezi.dir/objects.a
-C:\Users\purce\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin\ar.exe qc CMakeFiles\guvenlik_merkezi.dir/objects.a @CMakeFiles\guvenlik_merkezi.dir\objects1.rsp
-C:\Users\purce\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin\gcc.exe -Wl,--whole-archive CMakeFiles\guvenlik_merkezi.dir/objects.a -Wl,--no-whole-archive -o guvenlik_merkezi.exe -Wl,--out-implib,libguvenlik_merkezi.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\guvenlik_merkezi.dir\linkLibs.rsp
