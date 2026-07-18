@@ -1,9 +1,5 @@
 # Siber Güvenlik Merkezi
 
-Belediye Public Wi-Fi, Akıllı Kamera ve IoT Altyapısı için gerçek zamanlı siber güvenlik izleme ve tehdit tespit platformu.
-
-Eski Python tabanlı sürümden **tamamen yerel C diline** geçirilmiştir. Artık daha yüksek performanslı, düşük kaynak tüketen ve gelişmiş güvenlik araçlarına (otonom port tarayıcı, canlı ağ izleyici, brute-force testi) sahip, **Windows ve Linux** destekli standalone bir masaüstü uygulamasıdır.
-
 ## 📋 Özellikler
 
 - **Yerel ve Modern GUI** — Raylib kullanılarak geliştirilmiş, her çözünürlüğe ölçeklenebilen akıcı kullanıcı arayüzü.
