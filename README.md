@@ -57,5 +57,3 @@ Ağ tarama işlemlerinin doğru çalışması için uygulamanın **Yönetici Ola
 # veya (kullandığınız derleyiciye göre dizin değişebilir)
 .\guvenlik_merkezi.exe
 ```
-
-**Not:** MAC adres çözümlemeleri için `mac-addresses.txt` dosyasının derlenen çalıştırılabilir dosya ile aynı dizinde yer aldığından emin olun.
