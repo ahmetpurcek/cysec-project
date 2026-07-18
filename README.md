@@ -1,4 +1,4 @@
-# 🏛️ Akıllı Şehir Siber Güvenlik Merkezi
+# Siber Güvenlik Merkezi
 
 Belediye Public Wi-Fi, Akıllı Kamera ve IoT Altyapısı için gerçek zamanlı siber güvenlik izleme ve tehdit tespit platformu.
 
