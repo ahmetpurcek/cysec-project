@@ -37,11 +37,11 @@ CMakeFiles/guvenlik_merkezi.dir/src/gui.c.obj: \
  C:/Users/purce/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/x86_64-w64-mingw32/include/pthread_time.h \
  C:/Users/purce/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/x86_64-w64-mingw32/include/pthread_compat.h \
  C:/Users/purce/Downloads/proje/hackhathon/include/utils.h \
+ C:/Users/purce/Downloads/proje/hackhathon/include/brute_force.h \
  C:/Users/purce/Downloads/proje/hackhathon/include/log_analyzer.h \
  C:/Users/purce/Downloads/proje/hackhathon/include/network_monitor.h \
- C:/Users/purce/Downloads/proje/hackhathon/include/port_scanner.h \
- C:/Users/purce/Downloads/proje/hackhathon/include/brute_force.h \
  C:/Users/purce/Downloads/proje/hackhathon/include/platform.h \
+ C:/Users/purce/Downloads/proje/hackhathon/include/port_scanner.h \
  C:/Users/purce/Downloads/proje/hackhathon/include/utils.h \
  C:/Users/purce/Downloads/proje/hackhathon/lib/raygui.h \
  C:/Users/purce/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/x86_64-w64-mingw32/include/math.h \

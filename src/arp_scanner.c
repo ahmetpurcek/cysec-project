@@ -76,7 +76,9 @@ static int _scan_with_arp_table(Device *devices, int max_devices, const char *ne
                 base_parts[0], base_parts[1], base_parts[2], i);
 #endif
         }
+#ifdef PLATFORM_LINUX
         strcat(cmd, "wait 2>/dev/null");
+#endif
         platform_run_command(cmd, NULL, 0);
     }
     

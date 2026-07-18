@@ -27,6 +27,7 @@ static void _add_alert(AnalysisResult *r, const char *type, const char *severity
 }
 
 /* ========== Log Okuma ========== */
+#ifdef PLATFORM_LINUX
 static int _read_journal(char lines[][256], int max_lines, const char *unit, const char *since) {
     char cmd[512];
     if (unit && since)
@@ -440,11 +441,13 @@ static void _check_attack_processes(AnalysisResult *r) {
     }
 #endif
 }
+#endif
 
 /* ========== Ana Analiz ========== */
 void analyzer_run(AnalysisResult *r) {
     memset(r, 0, sizeof(AnalysisResult));
 
+#ifdef PLATFORM_LINUX
     _analyze_httpd_access(r);
     _analyze_journal(r);
     _analyze_mariadb(r);
@@ -452,6 +455,7 @@ void analyzer_run(AnalysisResult *r) {
     _analyze_login_history(r);
     _check_active_attacks(r);
     _check_attack_processes(r);
+#endif
 
     r->log_stats.total_lines = r->log_stats.journal_lines +
                                r->log_stats.httpd_access_lines +
@@ -478,6 +482,7 @@ void analyzer_run(AnalysisResult *r) {
 }
 
 int analyzer_read_raw_log(const char *source, char lines[][256], int max_lines) {
+#ifdef PLATFORM_LINUX
     if (strcmp(source, "journal") == 0)
         return _read_journal(lines, max_lines, NULL, "60 minutes ago");
     if (strcmp(source, "httpd_access") == 0) {
@@ -506,6 +511,7 @@ int analyzer_read_raw_log(const char *source, char lines[][256], int max_lines) 
         }
         return count;
     }
+#endif
     return 0;
 }
 
