@@ -1,0 +1,1 @@
+-IC:/Users/purce/Downloads/proje/hackhathon/include -IC:/Users/purce/Downloads/proje/hackhathon/lib -I"C:/Users/purce/Downloads/proje/hackhathon/build/_deps/raylib-src/src" -isystem "C:/Users/purce/Downloads/proje/hackhathon/build/_deps/raylib-src/src/external/glfw/include"
