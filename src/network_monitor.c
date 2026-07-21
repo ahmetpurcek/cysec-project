@@ -1421,6 +1421,18 @@ void full_monitor_stop(void) {
 #ifdef PLATFORM_LINUX
     if (pcap_handle) pcap_breakloop(pcap_handle);
 #endif
+    platform_sleep_ms(150);  /* thread'in kapanması için kısa bekle */
+}
+
+void full_monitor_clear(void) {
+    if (!initialized) return;
+    platform_mutex_lock(&global_lock);
+    memset(packet_buffer, 0, sizeof(packet_buffer));
+    write_idx = 0;
+    packet_count = 0;
+    total_captured = 0;
+    memset(&stats, 0, sizeof(stats));
+    platform_mutex_unlock(&global_lock);
 }
 
 int full_monitor_get_packets(PacketRecord *out, int max_count, int offset) {

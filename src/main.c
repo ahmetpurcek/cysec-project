@@ -33,8 +33,7 @@ int main(int argc, char *argv[]) {
     /* Otonom ağ taramasını başlat */
     scanner_start_auto_scan(15);
 
-    /* Ağ izlemeyi başlat */
-    full_monitor_start(NULL);
+    /* Ağ izleme: GUI'den cihaz bazında başlatılacak (Trafik Yakala butonu) */
 
     /* GUI başlat */
     gui_init(1280, 720);

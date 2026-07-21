@@ -69,6 +69,7 @@ void full_monitor_init(void);
 void full_monitor_cleanup(void);
 void full_monitor_start(const char *iface);
 void full_monitor_stop(void);
+void full_monitor_clear(void);
 int  full_monitor_get_packets(PacketRecord *out, int max_count, int offset);
 int  full_monitor_get_filtered(PacketRecord *out, int max_count, const char *filter_proto);
 void full_monitor_get_stats(FullStats *s);

@@ -42,6 +42,7 @@ static int g_ps_selected_vuln_port = -1; /* secili port vulnerability detail */
 static float g_scroll_ps_devices = 0;    /* port scanner cihaz listesi scroll */
 static float g_scroll_bf_devices = 0;    /* brute force cihaz listesi scroll */
 static int g_selected_layer = -1;
+static char g_capture_active_ip[MAX_IP_LEN] = {0}; /* aktif trafik izleme yapilan cihaz */
 
 
 static Font g_custom_font = {0};
@@ -94,6 +95,9 @@ static void draw_custom_scrollbar(float x, float y, float w, float view_h,
                        COLOR_SCROLLBAR);
 }
 
+/* Forward declaration — trafik yakalama yardımcıları */
+static void capture_stop_all(void);
+
 /* ========== Header ========== */
 static void draw_header(int W) {
   DrawRectangle(0, 0, W, 48, COLOR_HEADER_BG);
@@ -145,6 +149,8 @@ static void draw_tabs(int W) {
     }
     if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
       g_active_tab = i;
+      /* Tab değişince aktif izlemeyi durdur */
+      if (g_capture_active_ip[0]) capture_stop_all();
       if (i == TAB_DASHBOARD) {
         g_selected_device_ip[0] = '\0';
         g_scroll_devices = 0;
@@ -245,9 +251,19 @@ static void draw_panel_dashboard(int W, int H) {
 
     if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
       if (is_sel) {
+        /* Cihaz deselect — aktif izleme varsa durdur */
+        if (g_capture_active_ip[0] &&
+            strcmp(g_capture_active_ip, d->ip) == 0) {
+          capture_stop_all();
+        }
         g_selected_device_ip[0] = '\0';
         g_selected_packet_num = -1;
       } else {
+        /* Başka cihaz seçildi — eski izleme varsa durdur */
+        if (g_capture_active_ip[0] &&
+            strcmp(g_capture_active_ip, g_selected_device_ip) == 0) {
+          capture_stop_all();
+        }
         strncpy(g_selected_device_ip, d->ip, MAX_IP_LEN - 1);
         g_scroll_device_detail = 0;
         g_selected_packet_num = -1;
@@ -300,6 +316,34 @@ static void draw_right_panel_logs(int rx, int ry, int rw, int rh) {
   EndScissorMode();
 }
 
+/* --- Trafik yakalama yardımcıları (per-device capture) --- */
+static void capture_stop_all(void) {
+  if (arp_spoof_is_running()) arp_spoof_stop();
+  full_monitor_stop();
+  full_monitor_clear();
+  g_capture_active_ip[0] = '\0';
+}
+
+static void capture_start_for(const char *ip) {
+  /* Önce varsa eskisini durdur */
+  capture_stop_all();
+
+  /* Buffer'ı temizle */
+  full_monitor_clear();
+
+  /* Hedef IP'yi kaydet */
+  strncpy(g_capture_active_ip, ip, MAX_IP_LEN - 1);
+
+  /* pcap'i başlat */
+  full_monitor_start(NULL);
+
+  /* Yerel cihaz değilse ARP spoof başlat */
+  int is_local = (strcmp(ip, g_scan.local_ip) == 0);
+  if (!is_local && g_scan.gateway_ip[0] && g_scan.local_iface[0]) {
+    arp_spoof_start(ip, g_scan.gateway_ip, g_scan.local_iface);
+  }
+}
+
 /* Sag panel: Secili cihaz detayi (Wireshark tarzi Packet List + PDU Detail) */
 static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
   DrawRoundedPanel((Rectangle){rx, ry, rw, rh}, COLOR_PANEL, COLOR_BORDER);
@@ -316,6 +360,11 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
     DrawRectangleRounded(xbtn, 0.3f, 4, (Color){255, 255, 255, 12});
   DrawTextC("X", rx + rw - 22, ry + 9, 12, xhov ? COLOR_RED : COLOR_TEXT_DIM);
   if (xhov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+    /* Panel kapatılınca aktif izleme de durur */
+    if (g_capture_active_ip[0] &&
+        strcmp(g_capture_active_ip, g_selected_device_ip) == 0) {
+      capture_stop_all();
+    }
     g_selected_device_ip[0] = '\0';
     g_selected_packet_num = -1;
     return;
@@ -323,31 +372,42 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
 
   DrawRectangle(rx + 4, ry + 28, rw - 8, 1, COLOR_BORDER);
 
-  /* --- ARP Spoof kontrolü (yerel cihaz değilse göster) --- */
-  int is_local_device = (strcmp(g_selected_device_ip, g_scan.local_ip) == 0);
-  int spoof_active = arp_spoof_is_running();
-  int spoof_for_this = (spoof_active && strcmp(arp_spoof_get_target(), g_selected_device_ip) == 0);
+  /* --- Trafik Yakala / Durdur kontrolü (TÜM cihazlar için) --- */
+  int capture_for_this = (g_capture_active_ip[0] &&
+                          strcmp(g_capture_active_ip, g_selected_device_ip) == 0);
+  int capture_for_other = (g_capture_active_ip[0] && !capture_for_this);
 
-  if (!is_local_device) {
-    /* ARP Spoof durum göstergesi */
+  {
     int btn_x = rx + rw - 160;
     int btn_y = ry + 6;
 
-    if (spoof_for_this) {
-      /* Aktif: Yeşil dot + "Izleniyor" + Durdur butonu */
+    if (capture_for_this) {
+      /* Aktif izleme: Yeşil dot + "Izleniyor" + Durdur butonu */
       DrawCircle(btn_x - 8, btn_y + 10, 4, COLOR_GREEN);
       DrawTextC("Izleniyor", btn_x - 58, btn_y + 5, 9, COLOR_GREEN);
       Rectangle stop_btn = {btn_x, btn_y, 82, 18};
       DrawRectangleRounded(stop_btn, 0.4f, 4, (Color){239, 68, 68, 30});
       DrawRectangleRoundedLinesEx(stop_btn, 0.4f, 4, 1, COLOR_RED);
       int shov = CheckCollisionPointRec(GetMousePosition(), stop_btn);
-      DrawTextC("Durdur", btn_x + 20, btn_y + 4, 9, shov ? COLOR_RED : (Color){239, 130, 130, 255});
+      DrawTextC("Durdur", btn_x + 20, btn_y + 4, 9,
+                shov ? COLOR_RED : (Color){239, 130, 130, 255});
       if (shov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        arp_spoof_stop();
+        capture_stop_all();
+        capture_for_this = 0;
       }
-    } else if (spoof_active) {
-      /* Başka cihaz izleniyor */
-      DrawTextC("Baska cihaz izleniyor", btn_x - 58, btn_y + 5, 8, COLOR_AMBER);
+    } else if (capture_for_other) {
+      /* Başka cihaz izleniyor — önce onu durdur */
+      DrawTextC("Baska cihaz izleniyor", btn_x - 80, btn_y + 5, 8, COLOR_AMBER);
+      Rectangle cap_btn = {btn_x, btn_y, 110, 18};
+      DrawRectangleRounded(cap_btn, 0.4f, 4, (Color){99, 102, 241, 20});
+      DrawRectangleRoundedLinesEx(cap_btn, 0.4f, 4, 1, COLOR_ACCENT);
+      int chov = CheckCollisionPointRec(GetMousePosition(), cap_btn);
+      DrawTextC("Degistir", btn_x + 22, btn_y + 4, 9,
+                chov ? COLOR_ACCENT : COLOR_TEXT_SEC);
+      if (chov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        capture_start_for(g_selected_device_ip);
+        capture_for_this = 1;
+      }
     } else {
       /* Pasif: "Trafik Yakala" butonu */
       Rectangle cap_btn = {btn_x, btn_y, 110, 18};
@@ -357,35 +417,38 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
       DrawTextC("Trafik Yakala", btn_x + 10, btn_y + 4, 9,
                 chov ? COLOR_ACCENT : COLOR_TEXT_SEC);
       if (chov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        /* Gateway ve interface bilgisini ScanResults'tan al */
-        if (g_scan.gateway_ip[0] && g_scan.local_iface[0]) {
-          arp_spoof_start(g_selected_device_ip, g_scan.gateway_ip, g_scan.local_iface);
-        }
+        capture_start_for(g_selected_device_ip);
+        capture_for_this = 1;
       }
     }
   }
 
-  /* Tüm paketleri al, bu cihaza ait olanları filtrele (Stack overflow'u önlemek
-   * için static yapıldı) */
+  /* --- Paket listesi (sadece bu cihaz için aktif izleme varsa göster) --- */
   static PacketRecord all_packets[2048];
-  int c = full_monitor_get_packets(all_packets, 2048, 0);
-
   static PacketRecord dev_packets[1024];
   int dpc = 0;
-  for (int i = 0; i < c; i++) {
-    if (strcmp(all_packets[i].src_ip, g_selected_device_ip) == 0 ||
-        strcmp(all_packets[i].dst_ip, g_selected_device_ip) == 0 ||
-        strcmp(all_packets[i].src_mac, g_selected_device_ip) == 0 ||
-        strcmp(all_packets[i].dst_mac, g_selected_device_ip) == 0) {
-      if (dpc < 1024)
-        dev_packets[dpc++] = all_packets[i];
+
+  if (capture_for_this) {
+    int c = full_monitor_get_packets(all_packets, 2048, 0);
+    for (int i = 0; i < c; i++) {
+      if (strcmp(all_packets[i].src_ip, g_selected_device_ip) == 0 ||
+          strcmp(all_packets[i].dst_ip, g_selected_device_ip) == 0 ||
+          strcmp(all_packets[i].src_mac, g_selected_device_ip) == 0 ||
+          strcmp(all_packets[i].dst_mac, g_selected_device_ip) == 0) {
+        if (dpc < 1024)
+          dev_packets[dpc++] = all_packets[i];
+      }
     }
   }
 
   int py = ry + 36;
   char buf[256];
-  snprintf(buf, sizeof(buf), "Yakalanan Paket: %d", dpc);
-  DrawTextC(buf, rx + 8, py, 10, spoof_for_this ? COLOR_GREEN : COLOR_TEXT_SEC);
+  if (capture_for_this) {
+    snprintf(buf, sizeof(buf), "Yakalanan Paket: %d", dpc);
+    DrawTextC(buf, rx + 8, py, 10, COLOR_GREEN);
+  } else {
+    DrawTextC("Izleme baslatilmadi.", rx + 8, py, 10, COLOR_TEXT_DIM);
+  }
 
   if (g_selected_packet_num != -1) {
     if (GuiButton((Rectangle){rx + rw - 80, py - 2, 70, 18}, "Geri Don")) {
