@@ -77,4 +77,12 @@ void full_monitor_get_stats(FullStats *s);
 const char *svc_name(int port);
 const char *ip_proto_name(int proto);
 
+/* ===== ARP Spoof (MITM trafik yakalama) ===== */
+void arp_spoof_start(const char *target_ip, const char *gateway_ip, const char *iface);
+void arp_spoof_stop(void);
+int  arp_spoof_is_running(void);
+const char *arp_spoof_get_target(void);
+void enable_ip_forward(void);
+void disable_ip_forward(void);
+
 #endif /* NETWORK_MONITOR_H */

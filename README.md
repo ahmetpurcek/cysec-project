@@ -43,6 +43,7 @@ cmake --build . --config Release -j 4
 ### Linux
 Bazı gelişmiş tarama türleri (örn. SYN Scan) ve libpcap ile canlı trafik izleme özellikleri root yetkisi gerektirir.
 ```bash
+xhost +
 sudo ./guvenlik_merkezi
 ```
 

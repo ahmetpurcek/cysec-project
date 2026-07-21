@@ -33,7 +33,6 @@ static int g_raw_log_count = 0;
 static PortScanResults g_portscan;
 static float g_scroll_pcap_flows = 0;
 static float g_scroll_device_detail = 0;
-static int g_device_detail_subtab = 0; /* artik kullanilmiyor, silinebilir */
 static int g_security_subtab = 0;      /* 0=alerts, 1=logs */
 static int g_tools_subtab = 0;         /* 0=Port Tarayici, 1=Brute Force */
 static float g_scroll_tool_ports = 0;
@@ -44,9 +43,7 @@ static float g_scroll_ps_devices = 0;    /* port scanner cihaz listesi scroll */
 static float g_scroll_bf_devices = 0;    /* brute force cihaz listesi scroll */
 static int g_selected_layer = -1;
 
-/* Virtual Resolution — her frame pencere boyutuna eşitlenir */
-static int V_WIDTH = 1280;
-static int V_HEIGHT = 720;
+
 static Font g_custom_font = {0};
 static float g_ui_scale = 1.0f;
 
@@ -252,7 +249,6 @@ static void draw_panel_dashboard(int W, int H) {
         g_selected_packet_num = -1;
       } else {
         strncpy(g_selected_device_ip, d->ip, MAX_IP_LEN - 1);
-        g_device_detail_subtab = 0;
         g_scroll_device_detail = 0;
         g_selected_packet_num = -1;
       }
@@ -327,6 +323,48 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
 
   DrawRectangle(rx + 4, ry + 28, rw - 8, 1, COLOR_BORDER);
 
+  /* --- ARP Spoof kontrolü (yerel cihaz değilse göster) --- */
+  int is_local_device = (strcmp(g_selected_device_ip, g_scan.local_ip) == 0);
+  int spoof_active = arp_spoof_is_running();
+  int spoof_for_this = (spoof_active && strcmp(arp_spoof_get_target(), g_selected_device_ip) == 0);
+
+  if (!is_local_device) {
+    /* ARP Spoof durum göstergesi */
+    int btn_x = rx + rw - 160;
+    int btn_y = ry + 6;
+
+    if (spoof_for_this) {
+      /* Aktif: Yeşil dot + "Izleniyor" + Durdur butonu */
+      DrawCircle(btn_x - 8, btn_y + 10, 4, COLOR_GREEN);
+      DrawTextC("Izleniyor", btn_x - 58, btn_y + 5, 9, COLOR_GREEN);
+      Rectangle stop_btn = {btn_x, btn_y, 82, 18};
+      DrawRectangleRounded(stop_btn, 0.4f, 4, (Color){239, 68, 68, 30});
+      DrawRectangleRoundedLinesEx(stop_btn, 0.4f, 4, 1, COLOR_RED);
+      int shov = CheckCollisionPointRec(GetMousePosition(), stop_btn);
+      DrawTextC("Durdur", btn_x + 20, btn_y + 4, 9, shov ? COLOR_RED : (Color){239, 130, 130, 255});
+      if (shov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        arp_spoof_stop();
+      }
+    } else if (spoof_active) {
+      /* Başka cihaz izleniyor */
+      DrawTextC("Baska cihaz izleniyor", btn_x - 58, btn_y + 5, 8, COLOR_AMBER);
+    } else {
+      /* Pasif: "Trafik Yakala" butonu */
+      Rectangle cap_btn = {btn_x, btn_y, 110, 18};
+      DrawRectangleRounded(cap_btn, 0.4f, 4, (Color){99, 102, 241, 20});
+      DrawRectangleRoundedLinesEx(cap_btn, 0.4f, 4, 1, COLOR_ACCENT);
+      int chov = CheckCollisionPointRec(GetMousePosition(), cap_btn);
+      DrawTextC("Trafik Yakala", btn_x + 10, btn_y + 4, 9,
+                chov ? COLOR_ACCENT : COLOR_TEXT_SEC);
+      if (chov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        /* Gateway ve interface bilgisini ScanResults'tan al */
+        if (g_scan.gateway_ip[0] && g_scan.local_iface[0]) {
+          arp_spoof_start(g_selected_device_ip, g_scan.gateway_ip, g_scan.local_iface);
+        }
+      }
+    }
+  }
+
   /* Tüm paketleri al, bu cihaza ait olanları filtrele (Stack overflow'u önlemek
    * için static yapıldı) */
   static PacketRecord all_packets[2048];
@@ -347,7 +385,7 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
   int py = ry + 36;
   char buf[256];
   snprintf(buf, sizeof(buf), "Yakalanan Paket: %d", dpc);
-  DrawTextC(buf, rx + 8, py, 10, COLOR_GREEN);
+  DrawTextC(buf, rx + 8, py, 10, spoof_for_this ? COLOR_GREEN : COLOR_TEXT_SEC);
 
   if (g_selected_packet_num != -1) {
     if (GuiButton((Rectangle){rx + rw - 80, py - 2, 70, 18}, "Geri Don")) {
@@ -1377,17 +1415,17 @@ void gui_draw(void) {
   int m_height = GetMonitorHeight(monitor);
   if (m_height <= 0) m_height = GetScreenHeight();
 
-  // Monitör çözünürlüğüne göre ölçek (1080p -> 1.0, 2K -> 1.33, 4K -> 2.0)
-  // Text'lerin çük gibi kalmaması için native DPI tarzı ölçekleme
-  g_ui_scale = (float)m_height / 1080.0f;
+  // Monitör çözünürlüğüne göre ölçek (720p -> 1.0, 1080p -> 1.5, 2K -> 2.0, 4K -> 3.0)
+  // Text'lerin küçük kalmaması için native DPI tarzı ölçekleme
+  g_ui_scale = (float)m_height / 720.0f;
   if (g_ui_scale < 0.8f) g_ui_scale = 0.8f;
 
   int W = GetScreenWidth();
   int H = GetScreenHeight();
 
   // Mantıksal (Logical) ekran boyutunu hesapla
-  V_WIDTH = (int)(W / g_ui_scale);
-  V_HEIGHT = (int)(H / g_ui_scale);
+  int V_WIDTH = (int)(W / g_ui_scale);
+  int V_HEIGHT = (int)(H / g_ui_scale);
 
   // Mouse koordinatlarını logical koordinatlara çevir
   SetMouseScale(1.0f / g_ui_scale, 1.0f / g_ui_scale);
@@ -1437,6 +1475,5 @@ void gui_draw(void) {
 
 void gui_select_device(const char *ip) {
   strncpy(g_selected_device_ip, ip, MAX_IP_LEN - 1);
-  g_device_detail_subtab = 0;
   g_scroll_device_detail = 0;
 }

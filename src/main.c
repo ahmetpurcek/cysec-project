@@ -46,6 +46,7 @@ int main(int argc, char *argv[]) {
 
     /* Temizlik */
     gui_cleanup();
+    arp_spoof_stop();  /* ARP cache'i geri yükle */
     bf_cleanup();
     portscan_cleanup();
     full_monitor_cleanup();
