@@ -34,7 +34,7 @@ static PortScanResults g_portscan;
 static float g_scroll_pcap_flows = 0;
 static float g_scroll_device_detail = 0;
 static int g_security_subtab = 0;      /* 0=alerts, 1=logs */
-static int g_tools_subtab = 0;         /* 0=Port Tarayici, 1=Brute Force */
+static int g_tools_subtab = 0;         /* 0=Paket Izleme, 1=Port Tarayici, 2=Brute Force */
 static float g_scroll_tool_ports = 0;
 static int g_selected_packet_num = -1;
 static float g_scroll_pdu_detail = 0;
@@ -43,6 +43,10 @@ static float g_scroll_ps_devices = 0;    /* port scanner cihaz listesi scroll */
 static float g_scroll_bf_devices = 0;    /* brute force cihaz listesi scroll */
 static int g_selected_layer = -1;
 static char g_capture_active_ip[MAX_IP_LEN] = {0}; /* aktif trafik izleme yapilan cihaz */
+static float g_scroll_nm_devices = 0;    /* network monitor cihaz listesi scroll */
+static char g_nm_target[MAX_IP_LEN] = {0}; /* network monitor secili hedef */
+static int g_nm_prev_packet_count = 0;  /* auto-scroll icin onceki paket sayisi */
+static int g_nm_auto_scroll = 1;        /* 1=en altta, otomatik kaydir */
 
 
 static Font g_custom_font = {0};
@@ -344,13 +348,13 @@ static void capture_start_for(const char *ip) {
   }
 }
 
-/* Sag panel: Secili cihaz detayi (Wireshark tarzi Packet List + PDU Detail) */
+/* Sag panel: Secili cihaz bilgisi (basit ozet — trafik izleme Araclar'da) */
 static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
   DrawRoundedPanel((Rectangle){rx, ry, rw, rh}, COLOR_PANEL, COLOR_BORDER);
 
   /* Baslik */
   char tbuf[128];
-  snprintf(tbuf, sizeof(tbuf), "Cihaz Trafigi: %s", g_selected_device_ip);
+  snprintf(tbuf, sizeof(tbuf), "Cihaz: %s", g_selected_device_ip);
   DrawTextC(tbuf, rx + 12, ry + 8, 14, COLOR_ACCENT);
 
   /* Kapat (X) butonu */
@@ -360,303 +364,61 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
     DrawRectangleRounded(xbtn, 0.3f, 4, (Color){255, 255, 255, 12});
   DrawTextC("X", rx + rw - 22, ry + 9, 12, xhov ? COLOR_RED : COLOR_TEXT_DIM);
   if (xhov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-    /* Panel kapatılınca aktif izleme de durur */
-    if (g_capture_active_ip[0] &&
-        strcmp(g_capture_active_ip, g_selected_device_ip) == 0) {
-      capture_stop_all();
-    }
     g_selected_device_ip[0] = '\0';
-    g_selected_packet_num = -1;
     return;
   }
 
   DrawRectangle(rx + 4, ry + 28, rw - 8, 1, COLOR_BORDER);
 
-  /* --- Trafik Yakala / Durdur kontrolü (TÜM cihazlar için) --- */
-  int capture_for_this = (g_capture_active_ip[0] &&
-                          strcmp(g_capture_active_ip, g_selected_device_ip) == 0);
-  int capture_for_other = (g_capture_active_ip[0] && !capture_for_this);
-
-  {
-    int btn_x = rx + rw - 160;
-    int btn_y = ry + 6;
-
-    if (capture_for_this) {
-      /* Aktif izleme: Yeşil dot + "Izleniyor" + Durdur butonu */
-      DrawCircle(btn_x - 8, btn_y + 10, 4, COLOR_GREEN);
-      DrawTextC("Izleniyor", btn_x - 58, btn_y + 5, 9, COLOR_GREEN);
-      Rectangle stop_btn = {btn_x, btn_y, 82, 18};
-      DrawRectangleRounded(stop_btn, 0.4f, 4, (Color){239, 68, 68, 30});
-      DrawRectangleRoundedLinesEx(stop_btn, 0.4f, 4, 1, COLOR_RED);
-      int shov = CheckCollisionPointRec(GetMousePosition(), stop_btn);
-      DrawTextC("Durdur", btn_x + 20, btn_y + 4, 9,
-                shov ? COLOR_RED : (Color){239, 130, 130, 255});
-      if (shov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        capture_stop_all();
-        capture_for_this = 0;
-      }
-    } else if (capture_for_other) {
-      /* Başka cihaz izleniyor — önce onu durdur */
-      DrawTextC("Baska cihaz izleniyor", btn_x - 80, btn_y + 5, 8, COLOR_AMBER);
-      Rectangle cap_btn = {btn_x, btn_y, 110, 18};
-      DrawRectangleRounded(cap_btn, 0.4f, 4, (Color){99, 102, 241, 20});
-      DrawRectangleRoundedLinesEx(cap_btn, 0.4f, 4, 1, COLOR_ACCENT);
-      int chov = CheckCollisionPointRec(GetMousePosition(), cap_btn);
-      DrawTextC("Degistir", btn_x + 22, btn_y + 4, 9,
-                chov ? COLOR_ACCENT : COLOR_TEXT_SEC);
-      if (chov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        capture_start_for(g_selected_device_ip);
-        capture_for_this = 1;
-      }
-    } else {
-      /* Pasif: "Trafik Yakala" butonu */
-      Rectangle cap_btn = {btn_x, btn_y, 110, 18};
-      DrawRectangleRounded(cap_btn, 0.4f, 4, (Color){99, 102, 241, 20});
-      DrawRectangleRoundedLinesEx(cap_btn, 0.4f, 4, 1, COLOR_ACCENT);
-      int chov = CheckCollisionPointRec(GetMousePosition(), cap_btn);
-      DrawTextC("Trafik Yakala", btn_x + 10, btn_y + 4, 9,
-                chov ? COLOR_ACCENT : COLOR_TEXT_SEC);
-      if (chov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        capture_start_for(g_selected_device_ip);
-        capture_for_this = 1;
-      }
+  /* Cihaz bilgilerini bul */
+  Device *dev = NULL;
+  for (int i = 0; i < g_scan.device_count; i++) {
+    if (strcmp(g_scan.devices[i].ip, g_selected_device_ip) == 0) {
+      dev = &g_scan.devices[i];
+      break;
     }
   }
 
-  /* --- Paket listesi (sadece bu cihaz için aktif izleme varsa göster) --- */
-  static PacketRecord all_packets[2048];
-  static PacketRecord dev_packets[1024];
-  int dpc = 0;
+  int cy = ry + 40;
 
-  if (capture_for_this) {
-    int c = full_monitor_get_packets(all_packets, 2048, 0);
-    for (int i = 0; i < c; i++) {
-      if (strcmp(all_packets[i].src_ip, g_selected_device_ip) == 0 ||
-          strcmp(all_packets[i].dst_ip, g_selected_device_ip) == 0 ||
-          strcmp(all_packets[i].src_mac, g_selected_device_ip) == 0 ||
-          strcmp(all_packets[i].dst_mac, g_selected_device_ip) == 0) {
-        if (dpc < 1024)
-          dev_packets[dpc++] = all_packets[i];
-      }
-    }
-  }
-
-  int py = ry + 36;
-  char buf[256];
-  if (capture_for_this) {
-    snprintf(buf, sizeof(buf), "Yakalanan Paket: %d", dpc);
-    DrawTextC(buf, rx + 8, py, 10, COLOR_GREEN);
-  } else {
-    DrawTextC("Izleme baslatilmadi.", rx + 8, py, 10, COLOR_TEXT_DIM);
-  }
-
-  if (g_selected_packet_num != -1) {
-    if (GuiButton((Rectangle){rx + rw - 80, py - 2, 70, 18}, "Geri Don")) {
-      g_selected_packet_num = -1;
-      g_scroll_pdu_detail = 0;
-    }
-  }
-
-  py += 16;
-
-  if (g_selected_packet_num == -1) {
-    /* Paket Listesi Görünümü */
-    DrawRectangle(rx + 4, py, rw - 8, 16, COLOR_SURFACE);
-    DrawTextC("No", rx + 10, py + 3, 9, COLOR_TEXT_SEC);
-    DrawTextC("Zaman", rx + 40, py + 3, 9, COLOR_TEXT_SEC);
-    DrawTextC("Kaynak", rx + 90, py + 3, 9, COLOR_TEXT_SEC);
-    DrawTextC("Hedef", rx + 190, py + 3, 9, COLOR_TEXT_SEC);
-    DrawTextC("Proto", rx + 290, py + 3, 9, COLOR_TEXT_SEC);
-    DrawTextC("Bilgi", rx + 330, py + 3, 9, COLOR_TEXT_SEC);
-    py += 18;
-
-    if (dpc == 0) {
-      DrawTextC("Henuz cihaz trafigi yakalanmadi.", rx + 8, py + 20, 11,
-                COLOR_TEXT_DIM);
-    } else {
-      int lh = rh - (py - ry) - 4;
-      float ms = dpc * 18 - lh;
-      if (ms < 0)
-        ms = 0;
-      Rectangle fa = {rx, py, rw, lh};
-      if (CheckCollisionPointRec(GetMousePosition(), fa)) {
-        g_scroll_pcap_flows -= GetMouseWheelMove() * 25;
-        if (g_scroll_pcap_flows < 0)
-          g_scroll_pcap_flows = 0;
-        if (g_scroll_pcap_flows > ms)
-          g_scroll_pcap_flows = ms;
-      }
-      BeginScissorModeScaled(rx, py, rw, lh);
-      for (int i = 0; i < dpc; i++) {
-        int iy = py + i * 18 - (int)g_scroll_pcap_flows;
-        if (iy + 18 < py || iy > py + lh)
-          continue;
-        PacketRecord *p = &dev_packets[i];
-
-        Rectangle pr = {rx + 4, iy, rw - 24, 17};
-        int hover = CheckCollisionPointRec(GetMousePosition(), pr);
-        Color rbg =
-            hover ? COLOR_PANEL_HOVER
-                  : ((i % 2 == 0) ? (Color){12, 16, 28, 255} : COLOR_SURFACE);
-        DrawRectangleRec(pr, rbg);
-
-        Color pc = strcmp(p->protocol, "TCP") == 0
-                       ? COLOR_CYAN
-                       : (strcmp(p->protocol, "UDP") == 0 ? COLOR_ACCENT2
-                                                          : COLOR_TEXT);
-        if (strcmp(p->protocol, "DNS") == 0 ||
-            strcmp(p->protocol, "HTTP") == 0 || strcmp(p->protocol, "TLS") == 0)
-          pc = COLOR_GREEN;
-        if (strcmp(p->protocol, "ARP") == 0)
-          pc = COLOR_AMBER;
-        if (strcmp(p->protocol, "ICMP") == 0)
-          pc = COLOR_RED;
-
-        char sbuf[32];
-        snprintf(sbuf, sizeof(sbuf), "%d", p->packet_number);
-        DrawTextC(sbuf, rx + 10, iy + 3, 9, COLOR_TEXT_DIM);
-        snprintf(sbuf, sizeof(sbuf), "%.2f", p->timestamp - (int)p->timestamp);
-        DrawTextC(sbuf, rx + 40, iy + 3, 9, COLOR_TEXT_SEC);
-
-        DrawTextC(p->src_ip[0] ? p->src_ip : p->src_mac, rx + 90, iy + 3, 9,
-                  COLOR_TEXT);
-        DrawTextC(p->dst_ip[0] ? p->dst_ip : p->dst_mac, rx + 190, iy + 3, 9,
-                  COLOR_TEXT);
-
-        DrawTextC(p->protocol, rx + 290, iy + 3, 9, pc);
-
-        char infoshort[128];
-        strncpy(infoshort, p->info, 127);
-        infoshort[127] = '\0';
-        for (int c = 0; c < 127 && infoshort[c]; c++)
-          if (infoshort[c] == '\n' || infoshort[c] == '\r')
-            infoshort[c] = ' ';
-        DrawTextC(infoshort, rx + 330, iy + 3, 9, COLOR_TEXT_DIM);
-
-        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-          g_selected_packet_num = p->packet_number;
-          g_scroll_pdu_detail = 0;
-          g_selected_layer = -1;
-        }
-      }
-      EndScissorMode();
-      draw_custom_scrollbar(rx + rw - 10, py, 10, lh, dpc * 18,
-                            &g_scroll_pcap_flows);
-    }
-  } else {
-    /* Detaylı PDU Görünümü (Wireshark tarzı) */
-    PacketRecord *sel_p = NULL;
-    for (int i = 0; i < dpc; i++) {
-      if (dev_packets[i].packet_number == g_selected_packet_num) {
-        sel_p = &dev_packets[i];
-        break;
-      }
-    }
-
-    if (!sel_p) {
-      g_selected_packet_num = -1;
-      return;
-    }
-
-    int lh = rh - (py - ry) - 4;
-    Rectangle da = {rx, py, rw, lh};
-
-    /* Detay scroll limiti hesabı (dinamik) */
-    float ms = 0;
-    int d_y = 0;
-    for (int i = 0; i < sel_p->layer_count; i++) {
-      d_y += 24;
-      if (g_selected_layer == i) {
-        // Fields kaç satır?
-        int lines = 1;
-        for (int c = 0; sel_p->layers[i].fields[c]; c++)
-          if (sel_p->layers[i].fields[c] == '\n')
-            lines++;
-        d_y += lines * 14 + 10;
-      }
-    }
-    d_y += 30; /* Hex dump başlığı */
-    d_y += ((sel_p->raw_len + 15) / 16) * 14 + 10;
-    ms = d_y - lh;
-    if (ms < 0)
-      ms = 0;
-
-    if (CheckCollisionPointRec(GetMousePosition(), da)) {
-      g_scroll_pdu_detail -= GetMouseWheelMove() * 25;
-      if (g_scroll_pdu_detail < 0)
-        g_scroll_pdu_detail = 0;
-      if (g_scroll_pdu_detail > ms)
-        g_scroll_pdu_detail = ms;
-    }
-
-    BeginScissorModeScaled(rx, py, rw, lh);
-    int cy = py - (int)g_scroll_pdu_detail;
-
-    for (int i = 0; i < sel_p->layer_count; i++) {
-      PduLayer *l = &sel_p->layers[i];
-
-      Rectangle lr = {rx + 8, cy, rw - 28, 22};
-      int hover = CheckCollisionPointRec(GetMousePosition(), lr);
-      DrawRectangleRec(lr, hover ? COLOR_PANEL_HOVER : COLOR_SURFACE2);
-      DrawRectangleLinesEx(lr, 1, COLOR_BORDER);
-
-      char lhead[512];
-      snprintf(lhead, sizeof(lhead), "%s %s: %s",
-               g_selected_layer == i ? "v" : ">", l->name, l->summary);
-      DrawTextC(lhead, rx + 14, cy + 5, 11, COLOR_ACCENT);
-
-      if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        if (g_selected_layer == i)
-          g_selected_layer = -1;
-        else
-          g_selected_layer = i;
-      }
-      cy += 24;
-
-      if (g_selected_layer == i) {
-        char tmpf[1024];
-        strncpy(tmpf, l->fields, 1023);
-        tmpf[1023] = '\0';
-        char *line = strtok(tmpf, "\n");
-        while (line != NULL) {
-          DrawTextC(line, rx + 30, cy, 10, COLOR_TEXT_SEC);
-          cy += 14;
-          line = strtok(NULL, "\n");
-        }
-        cy += 10;
-      }
-    }
-
-    cy += 10;
-    DrawTextC("Frame Hex Dump", rx + 12, cy, 11, COLOR_TEXT);
+  if (dev) {
+    DrawTextC("IP Adresi:", rx + 16, cy, 10, COLOR_TEXT_SEC);
+    DrawTextC(dev->ip, rx + 100, cy, 11, COLOR_TEXT);
     cy += 18;
 
-    for (int r = 0; r < sel_p->raw_len; r += 16) {
-      char hexp[64] = {0};
-      char ascp[32] = {0};
-      snprintf(hexp, sizeof(hexp), "%04X  ", r);
-      for (int c = 0; c < 16; c++) {
-        if (r + c < sel_p->raw_len) {
-          char hb[8];
-          snprintf(hb, sizeof(hb), "%02X ", sel_p->raw_data[r + c]);
-          strcat(hexp, hb);
-          char ch = sel_p->raw_data[r + c];
-          ascp[c] = (ch >= 32 && ch <= 126) ? ch : '.';
-        } else {
-          strcat(hexp, "   ");
-          ascp[c] = ' ';
-        }
-      }
-      ascp[16] = '\0';
+    DrawTextC("MAC Adresi:", rx + 16, cy, 10, COLOR_TEXT_SEC);
+    DrawTextC(dev->mac, rx + 100, cy, 11, COLOR_TEXT);
+    cy += 18;
 
-      DrawTextC(hexp, rx + 12, cy, 10, COLOR_TEXT_SEC);
-      DrawTextC(ascp, rx + 300, cy, 10, COLOR_TEXT);
-      cy += 14;
+    if (dev->hostname[0]) {
+      DrawTextC("Hostname:", rx + 16, cy, 10, COLOR_TEXT_SEC);
+      DrawTextC(dev->hostname, rx + 100, cy, 11, COLOR_TEXT);
+      cy += 18;
     }
 
-    EndScissorMode();
-    draw_custom_scrollbar(rx + rw - 10, py, 10, lh, d_y, &g_scroll_pdu_detail);
+    if (dev->vendor[0]) {
+      DrawTextC("Uretici:", rx + 16, cy, 10, COLOR_TEXT_SEC);
+      DrawTextC(dev->vendor, rx + 100, cy, 11, COLOR_CYAN);
+      cy += 18;
+    }
+
+    int is_gw = (strcmp(dev->ip, g_scan.gateway_ip) == 0);
+    int is_local = (strcmp(dev->ip, g_scan.local_ip) == 0);
+    if (is_gw) {
+      DrawTextC("Rol: Gateway", rx + 16, cy, 10, COLOR_AMBER);
+      cy += 18;
+    } else if (is_local) {
+      DrawTextC("Rol: Bu Cihaz", rx + 16, cy, 10, COLOR_GREEN);
+      cy += 18;
+    }
+  } else {
+    DrawTextC("Cihaz bilgisi bulunamadi.", rx + 16, cy, 11, COLOR_TEXT_DIM);
+    cy += 18;
   }
+
+  cy += 12;
+  DrawRectangle(rx + 8, cy, rw - 16, 1, COLOR_BORDER);
+  cy += 12;
 }
 
 /* ========== Guvenlik Paneli (Uyarilar + Loglar) ========== */
@@ -855,9 +617,9 @@ static void draw_panel_tools(int W, int H) {
   int y0 = 86;
 
   /* Subtabs */
-  const char *stabs[] = {"Port Tarayici", "Brute Force"};
+  const char *stabs[] = {"Paket Izleme", "Port Tarayici", "Brute Force"};
   int stx = 16;
-  for (int i = 0; i < 2; i++) {
+  for (int i = 0; i < 3; i++) {
     int sw = MeasureText(stabs[i], 12) + 20;
     Rectangle sb = {stx, y0, sw, 22};
     int sh = CheckCollisionPointRec(GetMousePosition(), sb);
@@ -881,6 +643,378 @@ static void draw_panel_tools(int W, int H) {
   char buf[256];
 
   if (g_tools_subtab == 0) {
+    /* === Paket Izleme (Network Monitor) === */
+    int ctrl_w = 260;
+    int result_w = W - 24 - ctrl_w - 8;
+
+    /* --- Sol panel: Kontroller --- */
+    DrawRoundedPanel((Rectangle){12, py, ctrl_w, panel_h}, COLOR_PANEL,
+                     COLOR_BORDER);
+    DrawTextC("Paket Izleme", 24, py + 8, 13, COLOR_ACCENT);
+
+    int capture_for_this = (g_capture_active_ip[0] &&
+                            g_nm_target[0] &&
+                            strcmp(g_capture_active_ip, g_nm_target) == 0);
+
+    int cy = py + 28;
+
+    /* --- Hedef IP secimi (scrollable liste) --- */
+    DrawTextC("Hedef:", 24, cy, 10, COLOR_TEXT_SEC);
+    if (g_nm_target[0]) {
+      DrawRectangleRounded(
+          (Rectangle){64, cy - 2, MeasureText(g_nm_target, 10) + 10, 14}, 0.4f,
+          4, COLOR_SELECTED);
+      DrawTextC(g_nm_target, 69, cy, 10, COLOR_ACCENT);
+    }
+    cy += 16;
+
+    int ip_list_h = 100;
+    Rectangle ip_area = {20, cy, ctrl_w - 28, ip_list_h};
+    DrawRectangleRounded(ip_area, 0.04f, 4, COLOR_SURFACE);
+    int item_h = 20;
+    float ip_max_scroll = g_scan.device_count * item_h - ip_list_h;
+    if (ip_max_scroll < 0)
+      ip_max_scroll = 0;
+    if (CheckCollisionPointRec(GetMousePosition(), ip_area)) {
+      g_scroll_nm_devices -= GetMouseWheelMove() * 20;
+      if (g_scroll_nm_devices < 0)
+        g_scroll_nm_devices = 0;
+      if (g_scroll_nm_devices > ip_max_scroll)
+        g_scroll_nm_devices = ip_max_scroll;
+    }
+    BeginScissorModeScaled(ip_area.x, ip_area.y, ip_area.width, ip_area.height);
+    for (int i = 0; i < g_scan.device_count; i++) {
+      int iy = cy + i * item_h - (int)g_scroll_nm_devices;
+      if (iy + item_h < cy || iy > cy + ip_list_h)
+        continue;
+      Rectangle db = {22, iy + 1, ctrl_w - 44, item_h - 2};
+      int sel = (strcmp(g_nm_target, g_scan.devices[i].ip) == 0);
+      int hov = CheckCollisionPointRec(GetMousePosition(), db);
+      if (sel)
+        DrawRectangleRounded(db, 0.2f, 4, COLOR_SELECTED);
+      else if (hov)
+        DrawRectangleRounded(db, 0.2f, 4, COLOR_PANEL_HOVER);
+      if (sel)
+        DrawRectangle(db.x, db.y + 3, 3, db.height - 6, COLOR_ACCENT);
+      DrawTextC(g_scan.devices[i].ip, db.x + 10, db.y + 4, 10,
+                sel ? COLOR_ACCENT : COLOR_TEXT);
+      if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        /* Yeni cihaz secildiginde eski izlemeyi durdur */
+        if (g_nm_target[0] && strcmp(g_nm_target, g_scan.devices[i].ip) != 0) {
+          if (g_capture_active_ip[0]) capture_stop_all();
+        }
+        strncpy(g_nm_target, g_scan.devices[i].ip, MAX_IP_LEN - 1);
+        g_selected_packet_num = -1;
+        g_nm_prev_packet_count = 0;
+        g_nm_auto_scroll = 1;
+        g_scroll_pcap_flows = 0;
+      }
+    }
+    EndScissorMode();
+    draw_custom_scrollbar(ip_area.x + ip_area.width - 10, ip_area.y, 10,
+                          ip_list_h, g_scan.device_count * item_h,
+                          &g_scroll_nm_devices);
+    cy += ip_list_h + 8;
+
+    DrawRectangle(24, cy, ctrl_w - 40, 1, COLOR_BORDER);
+    cy += 8;
+
+    /* --- Trafik Yakala / Durdur kontrolleri --- */
+    if (g_nm_target[0] == '\0') {
+      DrawTextC("Bir hedef IP secin.", 24, cy + 4, 11, COLOR_TEXT_DIM);
+      cy += 20;
+    } else if (capture_for_this) {
+      /* Aktif izleme */
+      DrawCircle(30, cy + 8, 4, COLOR_GREEN);
+      DrawTextC("Izleniyor", 38, cy + 3, 10, COLOR_GREEN);
+      cy += 18;
+      if (GuiButton((Rectangle){24, cy, ctrl_w - 40, 26}, "Durdur")) {
+        capture_stop_all();
+        capture_for_this = 0;
+      }
+      cy += 30;
+    } else {
+      /* Pasif */
+      if (GuiButton((Rectangle){24, cy, ctrl_w - 40, 26}, "Trafik Yakala")) {
+        capture_start_for(g_nm_target);
+        capture_for_this = 1;
+      }
+      cy += 30;
+    }
+
+    DrawRectangle(24, cy, ctrl_w - 40, 1, COLOR_BORDER);
+    cy += 8;
+
+    /* --- Yakalanan paket ozeti --- */
+    static PacketRecord nm_all_packets[2048];
+    static PacketRecord nm_dev_packets[1024];
+    int nm_dpc = 0;
+
+    if (capture_for_this && g_nm_target[0]) {
+      int c = full_monitor_get_packets(nm_all_packets, 2048, 0);
+      for (int i = 0; i < c; i++) {
+        if (strcmp(nm_all_packets[i].src_ip, g_nm_target) == 0 ||
+            strcmp(nm_all_packets[i].dst_ip, g_nm_target) == 0 ||
+            strcmp(nm_all_packets[i].src_mac, g_nm_target) == 0 ||
+            strcmp(nm_all_packets[i].dst_mac, g_nm_target) == 0) {
+          if (nm_dpc < 1024)
+            nm_dev_packets[nm_dpc++] = nm_all_packets[i];
+        }
+      }
+    }
+
+    if (capture_for_this) {
+      snprintf(buf, sizeof(buf), "Paket: %d", nm_dpc);
+      DrawTextC(buf, 24, cy, 11, COLOR_GREEN);
+    } else if (g_nm_target[0]) {
+      /* Sadece IP seciliyken ama izleme baslatilmamissa goster */
+      DrawTextC("Izleme baslatilmadi.", 24, cy, 10, COLOR_TEXT_DIM);
+    }
+
+    /* --- Sag panel: Paket listesi ve detay --- */
+    int rx = 12 + ctrl_w + 8;
+    DrawRoundedPanel((Rectangle){rx, py, result_w, panel_h}, COLOR_PANEL,
+                     COLOR_BORDER);
+
+    if (g_nm_target[0]) {
+      snprintf(buf, sizeof(buf), "Trafik: %s", g_nm_target);
+      DrawTextC(buf, rx + 12, py + 8, 13, COLOR_ACCENT);
+    } else {
+      DrawTextC("Paket Listesi", rx + 12, py + 8, 13, COLOR_ACCENT);
+    }
+
+    if (g_selected_packet_num != -1) {
+      Rectangle back_btn = {rx + result_w - 80, py + 5, 70, 18};
+      if (GuiButton(back_btn, "Geri Don")) {
+        g_selected_packet_num = -1;
+        g_scroll_pdu_detail = 0;
+      }
+    }
+
+    int hdr_y = py + 28;
+    DrawRectangle(rx + 4, hdr_y, result_w - 8, 1, COLOR_BORDER);
+
+    if (g_selected_packet_num == -1) {
+      /* --- Paket Listesi Gorunumu --- */
+      int tbl_y = hdr_y + 4;
+      DrawRectangle(rx + 4, tbl_y, result_w - 8, 16, COLOR_SURFACE);
+      DrawTextC("No", rx + 10, tbl_y + 3, 9, COLOR_TEXT_SEC);
+      DrawTextC("Zaman", rx + 40, tbl_y + 3, 9, COLOR_TEXT_SEC);
+      DrawTextC("Kaynak", rx + 90, tbl_y + 3, 9, COLOR_TEXT_SEC);
+      DrawTextC("Hedef", rx + 190, tbl_y + 3, 9, COLOR_TEXT_SEC);
+      DrawTextC("Proto", rx + 290, tbl_y + 3, 9, COLOR_TEXT_SEC);
+      DrawTextC("Bilgi", rx + 330, tbl_y + 3, 9, COLOR_TEXT_SEC);
+      tbl_y += 18;
+
+      if (nm_dpc == 0) {
+        const char *msg = capture_for_this ? "Henuz paket yakalanmadi."
+                                           : "Izleme baslatilmadi.";
+        int mw = MeasureText(msg, 12);
+        DrawTextC(msg, rx + result_w / 2 - mw / 2, py + panel_h / 2, 12,
+                  COLOR_TEXT_SEC);
+      } else {
+        int lh = panel_h - (tbl_y - py) - 4;
+        float ms = nm_dpc * 18 - lh;
+        if (ms < 0)
+          ms = 0;
+
+        /* Wireshark tarzi auto-scroll: eger kullanici en alttaysa yeni
+           paketler geldiginde otomatik asagiya kaydir */
+        float scroll_threshold = 4.0f; /* px tolerans */
+
+        Rectangle fa = {rx, tbl_y, result_w, lh};
+        float wheel = GetMouseWheelMove();
+        if (CheckCollisionPointRec(GetMousePosition(), fa) && wheel != 0.0f) {
+          g_scroll_pcap_flows -= wheel * 25;
+          if (g_scroll_pcap_flows < 0)
+            g_scroll_pcap_flows = 0;
+          if (g_scroll_pcap_flows > ms)
+            g_scroll_pcap_flows = ms;
+          /* Kullanici yukari scroll yaptiysa auto-scroll kapat */
+          g_nm_auto_scroll = (g_scroll_pcap_flows >= ms - scroll_threshold);
+        }
+
+        /* Yeni paket geldiyse ve auto-scroll aktifse en alta kaydir */
+        if (nm_dpc > g_nm_prev_packet_count && g_nm_auto_scroll && ms > 0) {
+          g_scroll_pcap_flows = ms;
+        }
+        /* En altta olup olmadigini tekrar kontrol et */
+        if (g_scroll_pcap_flows >= ms - scroll_threshold) {
+          g_nm_auto_scroll = 1;
+        }
+        g_nm_prev_packet_count = nm_dpc;
+        BeginScissorModeScaled(rx, tbl_y, result_w, lh);
+        for (int i = 0; i < nm_dpc; i++) {
+          int iy = tbl_y + i * 18 - (int)g_scroll_pcap_flows;
+          if (iy + 18 < tbl_y || iy > tbl_y + lh)
+            continue;
+          PacketRecord *p = &nm_dev_packets[i];
+
+          Rectangle pr = {rx + 4, iy, result_w - 24, 17};
+          int hover = CheckCollisionPointRec(GetMousePosition(), pr);
+          Color rbg =
+              hover ? COLOR_PANEL_HOVER
+                    : ((i % 2 == 0) ? (Color){12, 16, 28, 255} : COLOR_SURFACE);
+          DrawRectangleRec(pr, rbg);
+
+          Color pc = strcmp(p->protocol, "TCP") == 0
+                         ? COLOR_CYAN
+                         : (strcmp(p->protocol, "UDP") == 0 ? COLOR_ACCENT2
+                                                            : COLOR_TEXT);
+          if (strcmp(p->protocol, "DNS") == 0 ||
+              strcmp(p->protocol, "HTTP") == 0 || strcmp(p->protocol, "TLS") == 0)
+            pc = COLOR_GREEN;
+          if (strcmp(p->protocol, "ARP") == 0)
+            pc = COLOR_AMBER;
+          if (strcmp(p->protocol, "ICMP") == 0)
+            pc = COLOR_RED;
+
+          char sbuf[32];
+          snprintf(sbuf, sizeof(sbuf), "%d", p->packet_number);
+          DrawTextC(sbuf, rx + 10, iy + 3, 9, COLOR_TEXT_DIM);
+          snprintf(sbuf, sizeof(sbuf), "%.2f", p->timestamp - (int)p->timestamp);
+          DrawTextC(sbuf, rx + 40, iy + 3, 9, COLOR_TEXT_SEC);
+
+          DrawTextC(p->src_ip[0] ? p->src_ip : p->src_mac, rx + 90, iy + 3, 9,
+                    COLOR_TEXT);
+          DrawTextC(p->dst_ip[0] ? p->dst_ip : p->dst_mac, rx + 190, iy + 3, 9,
+                    COLOR_TEXT);
+
+          DrawTextC(p->protocol, rx + 290, iy + 3, 9, pc);
+
+          char infoshort[128];
+          strncpy(infoshort, p->info, 127);
+          infoshort[127] = '\0';
+          for (int c = 0; c < 127 && infoshort[c]; c++)
+            if (infoshort[c] == '\n' || infoshort[c] == '\r')
+              infoshort[c] = ' ';
+          DrawTextC(infoshort, rx + 330, iy + 3, 9, COLOR_TEXT_DIM);
+
+          if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            g_selected_packet_num = p->packet_number;
+            g_scroll_pdu_detail = 0;
+            g_selected_layer = -1;
+          }
+        }
+        EndScissorMode();
+        draw_custom_scrollbar(rx + result_w - 10, tbl_y, 10, lh, nm_dpc * 18,
+                              &g_scroll_pcap_flows);
+      }
+    } else {
+      /* --- Detayli PDU Gorunumu (Wireshark tarzi) --- */
+      PacketRecord *sel_p = NULL;
+      for (int i = 0; i < nm_dpc; i++) {
+        if (nm_dev_packets[i].packet_number == g_selected_packet_num) {
+          sel_p = &nm_dev_packets[i];
+          break;
+        }
+      }
+
+      if (!sel_p) {
+        g_selected_packet_num = -1;
+      } else {
+        int pdu_y = hdr_y + 4;
+        int lh = panel_h - (pdu_y - py) - 4;
+        Rectangle da = {rx, pdu_y, result_w, lh};
+
+        /* Detay scroll limiti hesabi */
+        float ms_pdu = 0;
+        int d_y = 0;
+        for (int i = 0; i < sel_p->layer_count; i++) {
+          d_y += 24;
+          if (g_selected_layer == i) {
+            int lines = 1;
+            for (int c2 = 0; sel_p->layers[i].fields[c2]; c2++)
+              if (sel_p->layers[i].fields[c2] == '\n')
+                lines++;
+            d_y += lines * 14 + 10;
+          }
+        }
+        d_y += 30;
+        d_y += ((sel_p->raw_len + 15) / 16) * 14 + 10;
+        ms_pdu = d_y - lh;
+        if (ms_pdu < 0)
+          ms_pdu = 0;
+
+        if (CheckCollisionPointRec(GetMousePosition(), da)) {
+          g_scroll_pdu_detail -= GetMouseWheelMove() * 25;
+          if (g_scroll_pdu_detail < 0)
+            g_scroll_pdu_detail = 0;
+          if (g_scroll_pdu_detail > ms_pdu)
+            g_scroll_pdu_detail = ms_pdu;
+        }
+
+        BeginScissorModeScaled(rx, pdu_y, result_w, lh);
+        int cy2 = pdu_y - (int)g_scroll_pdu_detail;
+
+        for (int i = 0; i < sel_p->layer_count; i++) {
+          PduLayer *l = &sel_p->layers[i];
+
+          Rectangle lr = {rx + 8, cy2, result_w - 28, 22};
+          int hover = CheckCollisionPointRec(GetMousePosition(), lr);
+          DrawRectangleRec(lr, hover ? COLOR_PANEL_HOVER : COLOR_SURFACE2);
+          DrawRectangleLinesEx(lr, 1, COLOR_BORDER);
+
+          char lhead[512];
+          snprintf(lhead, sizeof(lhead), "%s %s: %s",
+                   g_selected_layer == i ? "v" : ">", l->name, l->summary);
+          DrawTextC(lhead, rx + 14, cy2 + 5, 11, COLOR_ACCENT);
+
+          if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            if (g_selected_layer == i)
+              g_selected_layer = -1;
+            else
+              g_selected_layer = i;
+          }
+          cy2 += 24;
+
+          if (g_selected_layer == i) {
+            char tmpf[1024];
+            strncpy(tmpf, l->fields, 1023);
+            tmpf[1023] = '\0';
+            char *line = strtok(tmpf, "\n");
+            while (line != NULL) {
+              DrawTextC(line, rx + 30, cy2, 10, COLOR_TEXT_SEC);
+              cy2 += 14;
+              line = strtok(NULL, "\n");
+            }
+            cy2 += 10;
+          }
+        }
+
+        cy2 += 10;
+        DrawTextC("Frame Hex Dump", rx + 12, cy2, 11, COLOR_TEXT);
+        cy2 += 18;
+
+        for (int r = 0; r < sel_p->raw_len; r += 16) {
+          char hexp[64] = {0};
+          char ascp[32] = {0};
+          snprintf(hexp, sizeof(hexp), "%04X  ", r);
+          for (int c2 = 0; c2 < 16; c2++) {
+            if (r + c2 < sel_p->raw_len) {
+              char hb[8];
+              snprintf(hb, sizeof(hb), "%02X ", sel_p->raw_data[r + c2]);
+              strcat(hexp, hb);
+              char ch = sel_p->raw_data[r + c2];
+              ascp[c2] = (ch >= 32 && ch <= 126) ? ch : '.';
+            } else {
+              strcat(hexp, "   ");
+              ascp[c2] = ' ';
+            }
+          }
+          ascp[16] = '\0';
+
+          DrawTextC(hexp, rx + 12, cy2, 10, COLOR_TEXT_SEC);
+          DrawTextC(ascp, rx + 300, cy2, 10, COLOR_TEXT);
+          cy2 += 14;
+        }
+
+        EndScissorMode();
+        draw_custom_scrollbar(rx + result_w - 10, pdu_y, 10, lh, d_y,
+                              &g_scroll_pdu_detail);
+      }
+    }
+  } else if (g_tools_subtab == 1) {
     /* === Port Tarayici === */
     int ctrl_w = 260;
     int result_w = W - 24 - ctrl_w - 8;
@@ -952,6 +1086,7 @@ static void draw_panel_tools(int W, int H) {
     /* --- Tarama butonlari --- */
     if (g_bf_target[0] == '\0') {
       DrawTextC("Bir hedef IP secin.", 24, cy + 4, 11, COLOR_TEXT_DIM);
+      cy += 20;
     } else if (!scanning) {
       DrawTextC("Tarama Baslat:", 24, cy, 10, COLOR_TEXT_SEC);
       cy += 16;
@@ -1017,7 +1152,7 @@ static void draw_panel_tools(int W, int H) {
         snprintf(buf, sizeof(buf), "Zafiyet: %d", g_portscan.total_vulns_found);
         DrawTextC(buf, 24, cy, 10, COLOR_RED);
       }
-    } else if (!is_this && !scanning) {
+    } else if (g_bf_target[0] && !is_this && !scanning) {
       DrawTextC("Sonuc yok.", 24, cy, 10, COLOR_TEXT_DIM);
     }
 
@@ -1203,7 +1338,7 @@ static void draw_panel_tools(int W, int H) {
       draw_custom_scrollbar(rx + result_w - 10, list_y0, 10, list_h, total_h,
                             &g_scroll_tool_ports);
     }
-  } else {
+  } else if (g_tools_subtab == 2) {
     /* === Brute Force === */
     bf_get_state(&g_bf_state);
     int cw = (W - 36) / 4;
