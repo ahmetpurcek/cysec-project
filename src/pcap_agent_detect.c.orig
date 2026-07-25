@@ -1,0 +1,194 @@
+/*
+ * pcap_agent_detect.c — Sınıflandırma ve Alarm Motoru
+ *
+ * Kosinüs benzerliği ile feature vektörünü kayıtlı imzalara
+ * karşılaştırır. Eşleşme olursa alarm üretir.
+ * Hiçbir imzaya uymayan yüksek anomali skorlu trafik de raporlanır.
+ */
+#include "pcap_agent.h"
+#include <math.h>
+
+/* ================================================================
+ * Kosinüs benzerliği
+ * ================================================================ */
+static double feature_similarity(pa_feature_t *a, pa_feature_t *b) {
+    double dot = 0.0, na = 0.0, nb = 0.0;
+    double *da = (double *)a, *db = (double *)b;
+    for (int i = 0; i < PA_FEATURE_DIM; i++) {
+        dot += da[i] * db[i];
+        na  += da[i] * da[i];
+        nb  += db[i] * db[i];
+    }
+    if (na < 1e-12 || nb < 1e-12) return 0.0;
+    return dot / (sqrt(na) * sqrt(nb));
+}
+
+/* ================================================================
+ * Alarm oluştur ve listeye ekle
+ * ================================================================ */
+static void push_alert(pa_agent_t *a, const char *sig_name,
+                       const char *sip, const char *dip,
+                       uint16_t sp, uint16_t dp, time_t ts, double score)
+{
+    pa_alert_t *al = (pa_alert_t *)malloc(sizeof(pa_alert_t));
+    if (!al) return;
+
+    strncpy(al->sig_name, sig_name, 63); al->sig_name[63] = '\0';
+    strncpy(al->src_ip_str, sip, 45);   al->src_ip_str[45] = '\0';
+    strncpy(al->dst_ip_str, dip, 45);   al->dst_ip_str[45] = '\0';
+    al->src_port = sp;
+    al->dst_port = dp;
+    al->ts       = ts;
+    al->score    = score;
+    al->next     = NULL;
+
+    if (a->alert_tail) {
+        a->alert_tail->next = al;
+    } else {
+        a->alert_head = al;
+    }
+    a->alert_tail = al;
+    a->alert_count++;
+
+    /* Terminale anında bas (kırmızı renkli) */
+    struct tm *tm_info = localtime(&ts);
+    char tbuf[32];
+    strftime(tbuf, sizeof(tbuf), "%H:%M:%S", tm_info);
+
+    printf("\033[31m[!] ALARM\033[0m [%s] %-20s | %s:%-5d -> %s:%-5d | skor=%.3f\n",
+           tbuf, sig_name, sip, sp, dip, dp, score);
+}
+
+/* ================================================================
+ * Sınıflandırma: feature vektörünü imzalarla karşılaştır
+ * ================================================================ */
+void pa_agent_classify(pa_agent_t *a, pa_feature_t *fv,
+                       const char *sip, const char *dip,
+                       uint16_t sp, uint16_t dp, time_t ts)
+{
+    double min_dist = 999.0;
+    int best_idx = -1;
+
+    for (int i = 0; i < a->sig_count; i++) {
+        double sim = feature_similarity(fv, &a->sigs[i].feat);
+        double d   = 1.0 - sim;   /* 0 = aynı, 1 = tamamen farklı */
+        if (d < min_dist) {
+            min_dist = d;
+            best_idx = i;
+        }
+    }
+
+    /* İmza eşleşmesi: %75+ benzerlik */
+    if (best_idx >= 0 && min_dist < 0.25) {
+        a->sigs[best_idx].match_count++;
+        a->sigs[best_idx].last_seen = ts;
+        push_alert(a, a->sigs[best_idx].name, sip, dip, sp, dp, ts,
+                   1.0 - min_dist);
+    }
+    /* Anomali tespiti: hiçbir imzaya uymuyorsa VE norm yüksekse */
+    else if (best_idx < 0 || min_dist >= 0.5) {
+        double norm = 0.0;
+        double *d = (double *)fv;
+        for (int i = 0; i < PA_FEATURE_DIM; i++)
+            norm += d[i] * d[i];
+        norm = sqrt(norm);
+
+        if (norm > 5.0) {
+            push_alert(a, "ANOMALI", sip, dip, sp, dp, ts,
+                       norm > 10.0 ? 0.9 : 0.5);
+        }
+    }
+}
+
+/* ================================================================
+ * Alarm listesini yazdır
+ * ================================================================ */
+void pa_agent_print_alerts(pa_agent_t *a) {
+    int cnt = 0;
+    pa_alert_t *cur = a->alert_head;
+    printf("\n--- Toplam Alarm Raporu ---\n");
+    while (cur) {
+        struct tm *tm_info = localtime(&cur->ts);
+        char tbuf[32];
+        strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", tm_info);
+        printf("[%s] %-20s %s:%-5d -> %s:%-5d  skor=%.3f\n",
+               tbuf, cur->sig_name, cur->src_ip_str, cur->src_port,
+               cur->dst_ip_str, cur->dst_port, cur->score);
+        cnt++;
+        cur = cur->next;
+    }
+    printf("Toplam %d alarm.\n\n", cnt);
+}
+
+/* ================================================================
+ * Alarm listesini temizle (bellek serbest bırak)
+ * ================================================================ */
+void pa_agent_free_alerts(pa_agent_t *a) {
+    pa_alert_t *cur = a->alert_head;
+    while (cur) {
+        pa_alert_t *tmp = cur;
+        cur = cur->next;
+        free(tmp);
+    }
+    a->alert_head  = NULL;
+    a->alert_tail  = NULL;
+    a->alert_count = 0;
+}
+
+/* ================================================================
+ * GUI Snapshot — alarm listesini flat array'e kopyala
+ * En son eklenen alarmları döndürür (max_count kadar).
+ * ================================================================ */
+int pa_agent_get_alerts_snapshot(pa_agent_t *a, pa_gui_alert_t *out, int max_count) {
+    if (!a || !out || max_count <= 0) return 0;
+
+    int total = a->alert_count;
+    if (total <= 0) return 0;
+
+    /* Son max_count alarmı al (en yeniler) */
+    int skip = total - max_count;
+    if (skip < 0) skip = 0;
+
+    pa_alert_t *cur = a->alert_head;
+    int idx = 0;
+    int cnt = 0;
+
+    while (cur) {
+        if (idx >= skip && cnt < max_count) {
+            pa_gui_alert_t *g = &out[cnt];
+            strncpy(g->sig_name, cur->sig_name, 63);
+            g->sig_name[63] = '\0';
+            strncpy(g->src_ip, cur->src_ip_str, 45);
+            g->src_ip[45] = '\0';
+            strncpy(g->dst_ip, cur->dst_ip_str, 45);
+            g->dst_ip[45] = '\0';
+            g->src_port = cur->src_port;
+            g->dst_port = cur->dst_port;
+            g->score = cur->score;
+
+            /* Zaman damgası */
+            struct tm *tm_info = localtime(&cur->ts);
+            if (tm_info)
+                strftime(g->timestamp, sizeof(g->timestamp),
+                         "%Y-%m-%d %H:%M:%S", tm_info);
+            else
+                snprintf(g->timestamp, sizeof(g->timestamp), "?");
+
+            /* Skor bazlı severity */
+            if (cur->score >= 0.85)
+                strcpy(g->severity, "KRITIK");
+            else if (cur->score >= 0.65)
+                strcpy(g->severity, "YUKSEK");
+            else if (cur->score >= 0.40)
+                strcpy(g->severity, "ORTA");
+            else
+                strcpy(g->severity, "DUSUK");
+
+            cnt++;
+        }
+        idx++;
+        cur = cur->next;
+    }
+
+    return cnt;
+}

@@ -4,7 +4,7 @@
 #include "gui.h"
 #include "arp_scanner.h"
 #include "brute_force.h"
-#include "log_analyzer.h"
+#include "pcap_agent.h"
 #include "network_monitor.h"
 #include "platform.h"
 #include "port_scanner.h"
@@ -20,20 +20,20 @@
 /* ========== State ========== */
 static GuiTab g_active_tab = TAB_DASHBOARD;
 static ScanResults g_scan;
-static AnalysisResult g_analysis;
 static ScanLog g_scanlog;
 static float g_scroll_devices = 0;
 static float g_scroll_alerts = 0;
-static float g_scroll_rawlog = 0;
 static char g_selected_device_ip[MAX_IP_LEN] = {0};
 static double g_last_refresh = 0;
-static char g_raw_log_source[32] = "journal";
-static char g_raw_log_lines[200][256];
-static int g_raw_log_count = 0;
+
+/* PCAP Agent GUI state */
+extern pa_agent_t g_pcap_agent;
+static pa_gui_alert_t g_pa_alerts[PA_MAX_GUI_ALERTS];
+static int g_pa_alert_count = 0;
 static PortScanResults g_portscan;
 static float g_scroll_pcap_flows = 0;
 static float g_scroll_device_detail = 0;
-static int g_security_subtab = 0;      /* 0=alerts, 1=logs */
+
 static int g_tools_subtab = 0;         /* 0=Paket Izleme, 1=Port Tarayici, 2=Brute Force */
 static float g_scroll_tool_ports = 0;
 static int g_selected_packet_num = -1;
@@ -421,188 +421,141 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
   cy += 12;
 }
 
-/* ========== Guvenlik Paneli (Uyarilar + Loglar) ========== */
+/* ========== Guvenlik Paneli (PCAP Agent Alarmlari) ========== */
 static void draw_panel_security(int W, int H) {
   int y0 = 86;
+  char buf[256];
 
-  /* Subtab: Uyarilar | Sistem Loglari */
-  const char *stabs[] = {"Uyarilar", "Sistem Loglari"};
-  int stx = 16;
-  for (int i = 0; i < 2; i++) {
-    int sw = MeasureText(stabs[i], 12) + 20;
-    Rectangle sb = {stx, y0, sw, 22};
-    int sh = CheckCollisionPointRec(GetMousePosition(), sb);
-    if (i == g_security_subtab) {
-      DrawRectangleRounded(sb, 0.4f, 4, COLOR_SELECTED);
-      DrawTextC(stabs[i], stx + 10, y0 + 5, 12, COLOR_ACCENT);
-    } else {
-      if (sh)
-        DrawRectangleRounded(sb, 0.4f, 4, (Color){255, 255, 255, 6});
-      DrawTextC(stabs[i], stx + 10, y0 + 5, 12,
-                sh ? COLOR_TEXT : COLOR_TEXT_SEC);
-    }
-    if (sh && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-      g_security_subtab = i;
-      g_scroll_alerts = 0;
-      g_scroll_rawlog = 0;
-    }
-    stx += sw + 4;
+  /* Severity sayaclari */
+  int cnt_kritik = 0, cnt_yuksek = 0, cnt_orta = 0, cnt_dusuk = 0;
+  for (int i = 0; i < g_pa_alert_count; i++) {
+    if (strcmp(g_pa_alerts[i].severity, "KRITIK") == 0) cnt_kritik++;
+    else if (strcmp(g_pa_alerts[i].severity, "YUKSEK") == 0) cnt_yuksek++;
+    else if (strcmp(g_pa_alerts[i].severity, "ORTA") == 0) cnt_orta++;
+    else cnt_dusuk++;
   }
 
-  int py = y0 + 28;
+  /* Stat kartlari */
+  int cw = (W - 36) / 4;
+  struct { const char *label; int val; Color color; } cats[] = {
+    {"Kritik", cnt_kritik, COLOR_RED},
+    {"Yuksek", cnt_yuksek, COLOR_AMBER},
+    {"Orta",   cnt_orta,   (Color){234, 179, 8, 255}},
+    {"Dusuk",  cnt_dusuk,  COLOR_GREEN},
+  };
+  char nbuf[16];
+  for (int i = 0; i < 4; i++) {
+    snprintf(nbuf, sizeof(nbuf), "%d", cats[i].val);
+    draw_stat_card((Rectangle){12 + i * cw, y0, cw - 4, 50},
+                   cats[i].label, nbuf, cats[i].color, NULL);
+  }
 
-  if (g_security_subtab == 0) {
-    /* === Uyarilar === */
-    int cw = (W - 36) / 5;
-    struct {
-      const char *label;
-      int *val;
-      Color color;
-    } cats[] = {
-        {"Kritik", &g_analysis.critical, COLOR_RED},
-        {"Yuksek", &g_analysis.high, COLOR_AMBER},
-        {"Orta", &g_analysis.medium, (Color){234, 179, 8, 255}},
-        {"Dusuk", &g_analysis.low, COLOR_GREEN},
-        {"Bilgi", &g_analysis.info, COLOR_TEXT_SEC},
-    };
-    char nbuf[8];
-    for (int i = 0; i < 5; i++) {
-      snprintf(nbuf, sizeof(nbuf), "%d", *cats[i].val);
-      draw_stat_card((Rectangle){12 + i * cw, py, cw - 4, 50}, cats[i].label,
-                     nbuf, cats[i].color, NULL);
-    }
+  int py = y0 + 58;
 
-    int panel_y = py + 58;
-    DrawRoundedPanel((Rectangle){12, panel_y, W - 24, H - panel_y - 8},
-                     COLOR_PANEL, COLOR_BORDER);
-    char title[64];
-    snprintf(title, sizeof(title), "Guvenlik Uyarilari (%d)",
-             g_analysis.alert_count);
-    DrawTextC(title, 24, panel_y + 8, 12, COLOR_ACCENT);
+  /* Agent durum paneli */
+  DrawRoundedPanel((Rectangle){12, py, W - 24, 36}, COLOR_SURFACE, COLOR_BORDER);
+  snprintf(buf, sizeof(buf), "Imza: %d", g_pcap_agent.sig_count);
+  DrawTextC(buf, 24, py + 12, 10, COLOR_CYAN);
+  snprintf(buf, sizeof(buf), "Paket: %lu",
+           (unsigned long)g_pcap_agent.total_pkts_processed);
+  DrawTextC(buf, 120, py + 12, 10, COLOR_TEXT_SEC);
+  snprintf(buf, sizeof(buf), "Flow: %d", g_pcap_agent.flow_count);
+  DrawTextC(buf, 260, py + 12, 10, COLOR_TEXT_SEC);
 
-    Rectangle clr_btn = {W - 110, panel_y + 5, 80, 20};
-    if (GuiButton(clr_btn, "Temizle")) {
-      analyzer_clear_alerts();
-      analyzer_run(&g_analysis);
-    }
-
-    if (g_analysis.alert_count == 0) {
-      DrawTextC("Aktif uyari yok.", W / 2 - 60, H / 2, 14, COLOR_GREEN);
-      return;
-    }
-
-    int item_h = 64;
-    Rectangle area = {12, panel_y + 30, W - 24, H - panel_y - 42};
-    if (CheckCollisionPointRec(GetMousePosition(), area)) {
-      g_scroll_alerts -= GetMouseWheelMove() * 40;
-      if (g_scroll_alerts < 0)
-        g_scroll_alerts = 0;
-      float mx = (g_analysis.alert_count * item_h) - area.height;
-      if (mx < 0)
-        mx = 0;
-      if (g_scroll_alerts > mx)
-        g_scroll_alerts = mx;
-    }
-
-    BeginScissorModeScaled(area.x, area.y, area.width, area.height);
-    for (int i = 0; i < g_analysis.alert_count; i++) {
-      int iy = area.y + i * item_h - (int)g_scroll_alerts;
-      if (iy + item_h < area.y || iy > area.y + area.height)
-        continue;
-      Alert *a = &g_analysis.alerts[i];
-      Rectangle ir = {area.x + 4, iy, area.width - 8, item_h - 3};
-
-      Color bg = str_contains(a->severity, "KRITIK")   ? (Color){40, 8, 8, 255}
-                 : str_contains(a->severity, "YUKSEK") ? (Color){35, 18, 6, 255}
-                                                       : COLOR_SURFACE;
-      DrawRectangleRounded(ir, 0.06f, 6, bg);
-
-      Color sc = str_contains(a->severity, "KRITIK")   ? COLOR_RED
-                 : str_contains(a->severity, "YUKSEK") ? COLOR_AMBER
-                 : str_contains(a->severity, "ORTA") ? (Color){234, 179, 8, 255}
-                                                     : COLOR_GREEN;
-      DrawRectangle(ir.x, ir.y, 3, ir.height, sc);
-
-      int slw = MeasureText(a->severity, 8) + 8;
-      DrawRectangleRounded((Rectangle){ir.x + 8, ir.y + 5, slw, 12}, 0.5f, 4,
-                           (Color){sc.r, sc.g, sc.b, 50});
-      DrawTextC(a->severity, ir.x + 12, ir.y + 6, 8, sc);
-
-      DrawTextC(a->title, ir.x + 12, ir.y + 20, 11, COLOR_TEXT);
-      DrawTextC(a->description, ir.x + 12, ir.y + 34, 9, COLOR_TEXT_SEC);
-      DrawTextC(a->recommendation, ir.x + 12, ir.y + 47, 9, COLOR_TEXT_DIM);
-    }
-    EndScissorMode();
+  /* Canli/Pasif durumu */
+  if (g_pcap_agent.running) {
+    DrawCircle(W - 80, py + 18, 4, COLOR_GREEN);
+    DrawTextC("Canli", W - 72, py + 12, 10, COLOR_GREEN);
   } else {
-    /* === Sistem Loglari === */
-    DrawRoundedPanel((Rectangle){12, py, W - 24, H - py - 8}, COLOR_PANEL,
-                     COLOR_BORDER);
-    DrawTextC("Sistem Log Analizi", 24, py + 8, 12, COLOR_ACCENT);
-
-    const char *sources[] = {"journal", "httpd_access", "httpd_error",
-                             "mariadb", "dmesg"};
-    const char *labels[] = {"Journal", "HTTP", "Hatalar", "DB", "Kernel"};
-    int bx = W - 420;
-    for (int i = 0; i < 5; i++) {
-      Rectangle b = {bx, py + 5, 76, 20};
-      int active = (strcmp(g_raw_log_source, sources[i]) == 0);
-      if (active)
-        DrawRectangleRounded(b, 0.4f, 4, COLOR_SELECTED);
-      int hover = CheckCollisionPointRec(GetMousePosition(), b);
-      if (hover && !active)
-        DrawRectangleRounded(b, 0.4f, 4, (Color){255, 255, 255, 6});
-      DrawTextC(labels[i], bx + 6, py + 9, 10,
-                active ? COLOR_ACCENT : (hover ? COLOR_TEXT : COLOR_TEXT_SEC));
-      if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        strncpy(g_raw_log_source, sources[i], sizeof(g_raw_log_source));
-        g_raw_log_count =
-            analyzer_read_raw_log(g_raw_log_source, g_raw_log_lines, 200);
-        g_scroll_rawlog = 0;
-      }
-      bx += 82;
-    }
-
-    Rectangle la = {16, py + 30, W - 32, H - py - 42};
-    DrawRectangleRounded(la, 0.02f, 4, COLOR_TERMINAL_BG);
-
-    if (CheckCollisionPointRec(GetMousePosition(), la)) {
-      g_scroll_rawlog -= GetMouseWheelMove() * 40;
-      if (g_scroll_rawlog < 0)
-        g_scroll_rawlog = 0;
-      float mx = g_raw_log_count * 13 - la.height;
-      if (mx < 0)
-        mx = 0;
-      if (g_scroll_rawlog > mx)
-        g_scroll_rawlog = mx;
-    }
-
-    char lc_info[32];
-    snprintf(lc_info, sizeof(lc_info), "%d satir", g_raw_log_count);
-    int liw = MeasureText(lc_info, 10);
-    DrawTextC(lc_info, W - liw - 24, py + 10, 10, COLOR_TEXT_DIM);
-
-    if (g_raw_log_count == 0) {
-      DrawTextC("Log bulunamadi.", la.x + 20, la.y + la.height / 2, 12,
-                COLOR_TEXT_SEC);
-    }
-
-    BeginScissorModeScaled(la.x, la.y, la.width, la.height);
-    for (int i = 0; i < g_raw_log_count; i++) {
-      int ly = la.y + 4 + i * 13 - (int)g_scroll_rawlog;
-      if (ly + 13 < la.y || ly > la.y + la.height)
-        continue;
-      Color lcolor = str_contains_ci(g_raw_log_lines[i], "error") ||
-                             str_contains_ci(g_raw_log_lines[i], "crit")
-                         ? COLOR_RED
-                     : str_contains_ci(g_raw_log_lines[i], "warn") ? COLOR_AMBER
-                     : str_contains_ci(g_raw_log_lines[i], "failed") ||
-                             str_contains_ci(g_raw_log_lines[i], "denied")
-                         ? (Color){245, 158, 100, 255}
-                         : COLOR_TEXT_DIM;
-      DrawText(g_raw_log_lines[i], la.x + 8, ly, 10, lcolor);
-    }
-    EndScissorMode();
+    DrawCircle(W - 80, py + 18, 4, COLOR_TEXT_DIM);
+    DrawTextC("Pasif", W - 72, py + 12, 10, COLOR_TEXT_DIM);
   }
+
+  py += 42;
+
+  /* Alarm listesi paneli */
+  DrawRoundedPanel((Rectangle){12, py, W - 24, H - py - 8},
+                   COLOR_PANEL, COLOR_BORDER);
+  snprintf(buf, sizeof(buf), "Tehdit Alarmlari (%d)", g_pa_alert_count);
+  DrawTextC(buf, 24, py + 8, 12, COLOR_ACCENT);
+
+  /* Temizle butonu */
+  Rectangle clr_btn = {W - 110, py + 5, 80, 20};
+  if (GuiButton(clr_btn, "Temizle")) {
+    pa_agent_free_alerts(&g_pcap_agent);
+    g_pa_alert_count = 0;
+  }
+
+  if (g_pa_alert_count == 0) {
+    DrawTextC("Aktif tehdit alarmi yok.", W / 2 - 80, H / 2, 14, COLOR_GREEN);
+    if (g_pcap_agent.sig_count == 0)
+      DrawTextC("pcap_files/ dizinine pcap dosyasi ekleyin.",
+                W / 2 - 140, H / 2 + 22, 11, COLOR_TEXT_DIM);
+    return;
+  }
+
+  int item_h = 52;
+  Rectangle area = {12, py + 30, W - 24, H - py - 42};
+  if (CheckCollisionPointRec(GetMousePosition(), area)) {
+    g_scroll_alerts -= GetMouseWheelMove() * 40;
+    if (g_scroll_alerts < 0) g_scroll_alerts = 0;
+    float mx = (g_pa_alert_count * item_h) - area.height;
+    if (mx < 0) mx = 0;
+    if (g_scroll_alerts > mx) g_scroll_alerts = mx;
+  }
+
+  BeginScissorModeScaled(area.x, area.y, area.width, area.height);
+  for (int i = g_pa_alert_count - 1; i >= 0; i--) {
+    int draw_idx = g_pa_alert_count - 1 - i;
+    int iy = area.y + draw_idx * item_h - (int)g_scroll_alerts;
+    if (iy + item_h < area.y || iy > area.y + area.height) continue;
+
+    pa_gui_alert_t *al = &g_pa_alerts[i];
+    Rectangle ir = {area.x + 4, iy, area.width - 8, item_h - 3};
+
+    /* Arka plan rengi severity'ye gore */
+    Color bg = strcmp(al->severity, "KRITIK") == 0 ? (Color){40, 8, 8, 255}
+             : strcmp(al->severity, "YUKSEK") == 0 ? (Color){35, 18, 6, 255}
+             : COLOR_SURFACE;
+    DrawRectangleRounded(ir, 0.06f, 6, bg);
+
+    Color sc = strcmp(al->severity, "KRITIK") == 0 ? COLOR_RED
+             : strcmp(al->severity, "YUKSEK") == 0 ? COLOR_AMBER
+             : strcmp(al->severity, "ORTA") == 0   ? (Color){234, 179, 8, 255}
+             : COLOR_GREEN;
+    DrawRectangle(ir.x, ir.y, 3, ir.height, sc);
+
+    /* Severity badge */
+    int slw = MeasureText(al->severity, 8) + 8;
+    DrawRectangleRounded((Rectangle){ir.x + 8, ir.y + 4, slw, 12},
+                         0.5f, 4, (Color){sc.r, sc.g, sc.b, 50});
+    DrawTextC(al->severity, ir.x + 12, ir.y + 5, 8, sc);
+
+    /* Skor badge */
+    snprintf(buf, sizeof(buf), "%.0f%%", al->score * 100);
+    int skw = MeasureText(buf, 8) + 8;
+    DrawRectangleRounded(
+        (Rectangle){ir.x + 12 + slw + 4, ir.y + 4, skw, 12},
+        0.5f, 4, (Color){sc.r, sc.g, sc.b, 30});
+    DrawTextC(buf, ir.x + 16 + slw + 4, ir.y + 5, 8, sc);
+
+    /* Imza adi */
+    DrawTextC(al->sig_name, ir.x + 12, ir.y + 19, 11, COLOR_TEXT);
+
+    /* Kaynak -> Hedef */
+    snprintf(buf, sizeof(buf), "%s:%d -> %s:%d",
+             al->src_ip, al->src_port, al->dst_ip, al->dst_port);
+    DrawTextC(buf, ir.x + 12, ir.y + 33, 9, COLOR_TEXT_SEC);
+
+    /* Zaman */
+    int tw = MeasureText(al->timestamp, 9);
+    DrawTextC(al->timestamp, ir.x + ir.width - tw - 8, ir.y + 6, 9,
+              COLOR_TEXT_DIM);
+  }
+  EndScissorMode();
+
+  draw_custom_scrollbar(area.x + area.width - 10, area.y, 10, area.height,
+                        g_pa_alert_count * item_h, &g_scroll_alerts);
 }
 
 /* ========== Araclar Paneli (Port Scan + Brute Force) ========== */
@@ -1597,7 +1550,9 @@ void gui_init(int width, int height) {
   }
 
   /* İlk log yükle */
-  g_raw_log_count = analyzer_read_raw_log("journal", g_raw_log_lines, 200);
+  /* PCAP Agent alert snapshot */
+  g_pa_alert_count = pa_agent_get_alerts_snapshot(
+      &g_pcap_agent, g_pa_alerts, PA_MAX_GUI_ALERTS);
 }
 
 void gui_cleanup(void) {
@@ -1634,7 +1589,8 @@ void gui_draw(void) {
   if (now - g_last_refresh > 2.0) {
     scanner_get_results(&g_scan);
     scanner_get_log(&g_scanlog);
-    analyzer_run(&g_analysis);
+    g_pa_alert_count = pa_agent_get_alerts_snapshot(
+        &g_pcap_agent, g_pa_alerts, PA_MAX_GUI_ALERTS);
     g_last_refresh = now;
   }
 
