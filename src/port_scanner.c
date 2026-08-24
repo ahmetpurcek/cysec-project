@@ -36,8 +36,6 @@
 typedef int socklen_t;
 #else
 typedef int SOCKET;
-#define INVALID_SOCKET -1
-#define closesocket close
 #endif
 
 #ifdef PLATFORM_LINUX
@@ -985,10 +983,8 @@ static const VulnDBEntry g_vulndb[] = {
     {NULL, NULL, NULL, NULL, NULL, NULL}
 };
 
-/* ========== Evasion/Stealth global state ========== */
-static StealthConfig g_stealth = STEALTH_CONFIG_DEFAULT;
-
 /* ========== Global State ========== */
+static StealthConfig g_stealth = STEALTH_CONFIG_DEFAULT;
 static PortScanResults g_results;
 static int g_scanner_running = 0;
 static int g_initialized     = 0;
@@ -1007,18 +1003,23 @@ static double _get_time_ms(void) {
 #endif
 }
 
-/* ========== Rastgele sayı üreteci (jitter vs için) ========== */
+/* ========== Yardımcı ========== */
 static int _rand_range(int min, int max) {
     if (max <= min) return min;
     return min + rand() % (max - min + 1);
 }
 
-/* ========== Stealth delay (jitter + rastgele gecikme) ========== */
-static void _stealth_delay(void) {
-    int base = g_stealth.min_delay_ms;
+/* Akıllı delay: hız >= 3 ise hiç bekleme yok, düşük hızda kısıtlı jitter */
+static void _smart_delay(void) {
+    if (g_stealth.scan_speed >= 3) return;
+    int base = (g_stealth.scan_speed <= 0)
+               ? g_stealth.min_delay_ms
+               : g_stealth.min_delay_ms / 2;
+    if (base <= 0) return;
     int jitter = (g_stealth.jitter_percent * g_stealth.max_delay_ms) / 100;
-    int delay = base + (rand() % (jitter + 1));
-    platform_sleep_ms(delay);
+    int d = base + (jitter > 0 ? rand() % (jitter + 1) : 0);
+    if (d > 50) d = 50; /* cap 50 ms */
+    if (d > 0) platform_sleep_ms(d);
 }
 
 /* ========== Public Helpers ========== */
@@ -1037,66 +1038,49 @@ const char *portscan_guess_os(int ttl) {
     return "Bilinmiyor";
 }
 
-/* ========== Zafiyet sorgulama motoru ========== */
+/* ========== Zafiyet sorgulama ========== */
 int portscan_lookup_vulns(const char *service, const char *version,
                           VulnerabilityNote *out, int max_vulns) {
     if (!service || !out || max_vulns <= 0) return 0;
-    
     int found = 0;
     for (int i = 0; g_vulndb[i].service != NULL && found < max_vulns; i++) {
         if (strcasecmp(g_vulndb[i].service, service) != 0) continue;
-        
-        /* Versiyon pattern kontrolü */
-        int match = 0;
-        if (g_vulndb[i].version_pattern == NULL) {
-            match = 1; /* her versiyon */
-        } else if (version && strlen(version) > 0) {
-            /* Basit prefix eşleme */
-            if (strncmp(version, g_vulndb[i].version_pattern,
-                        strlen(g_vulndb[i].version_pattern)) == 0) {
-                match = 1;
-            }
-        }
-        
-        if (match) {
-            strncpy(out[found].cve_id, g_vulndb[i].cve, sizeof(out[found].cve_id) - 1);
-            strncpy(out[found].description, g_vulndb[i].desc, sizeof(out[found].description) - 1);
-            strncpy(out[found].severity, g_vulndb[i].severity, sizeof(out[found].severity) - 1);
-            strncpy(out[found].recommendation, g_vulndb[i].recommendation, sizeof(out[found].recommendation) - 1);
-            found++;
-        }
+        int match = (g_vulndb[i].version_pattern == NULL) ? 1
+                    : (version && strstr(version, g_vulndb[i].version_pattern) != NULL);
+        if (!match) continue;
+        strncpy(out[found].cve_id,        g_vulndb[i].cve,            sizeof(out[found].cve_id) - 1);
+        strncpy(out[found].description,   g_vulndb[i].desc,           sizeof(out[found].description) - 1);
+        strncpy(out[found].severity,      g_vulndb[i].severity,       sizeof(out[found].severity) - 1);
+        strncpy(out[found].recommendation,g_vulndb[i].recommendation, sizeof(out[found].recommendation) - 1);
+        found++;
     }
     return found;
 }
 
-/* ========== TCP Connect Scan (stealth gecikmeli) ========== */
+/* ========== TCP Connect Scan (ana motor) ========== */
 static int _tcp_connect_scan(uint32_t ip, int port,
                              char *banner, int banner_sz,
                              double *rtt, int *ttl,
                              char *product, int product_sz) {
-    /* Stealth delay uygula */
-    _stealth_delay();
+    _smart_delay();
 
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) return 0;
 
-    /* Non-blocking yap */
 #ifdef PLATFORM_LINUX
-    int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    int fl = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, fl | O_NONBLOCK);
 #else
-    u_long mode = 1;
-    ioctlsocket(sock, FIONBIO, &mode);
+    u_long mode = 1; ioctlsocket(sock, FIONBIO, &mode);
 #endif
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family      = AF_INET;
-    addr.sin_port        = htons((unsigned short)port);
+    addr.sin_port        = htons((uint16_t)port);
     addr.sin_addr.s_addr = ip;
 
     double t0 = _get_time_ms();
-
     int rc = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     if (rc != 0) {
 #ifdef PLATFORM_LINUX
@@ -1106,562 +1090,333 @@ static int _tcp_connect_scan(uint32_t ip, int port,
 #endif
     }
 
-    /* poll/select ile bekle */
-    int timeout_ms = PS_TIMEOUT_BASE + (g_stealth.scan_speed * 200);
+    /* Timeout: base + speed * 150 ms (turbo modda daha kısa) */
+    int tmo = PS_TIMEOUT_BASE + (g_stealth.scan_speed * 150);
 #ifdef PLATFORM_LINUX
-    struct pollfd pfd = { sock, POLLOUT, 0 };
-    rc = poll(&pfd, 1, timeout_ms);
+    struct pollfd pf = { sock, POLLOUT, 0 };
+    rc = poll(&pf, 1, tmo);
 #else
-    fd_set wset;
-    FD_ZERO(&wset);
-    FD_SET(sock, &wset);
-    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    fd_set wset; FD_ZERO(&wset); FD_SET(sock, &wset);
+    struct timeval tv = { tmo / 1000, (tmo % 1000) * 1000 };
     rc = select(0, NULL, &wset, NULL, &tv);
 #endif
-
-    double t1 = _get_time_ms();
-    *rtt = t1 - t0;
+    *rtt = _get_time_ms() - t0;
 
     if (rc <= 0) { closesocket(sock); return 0; }
 
-    /* Bağlantı hatası kontrolü */
-    int err = 0;
-    socklen_t errlen = sizeof(err);
-    getsockopt(sock, SOL_SOCKET, SO_ERROR, (char *)&err, &errlen);
-    if (err != 0) { closesocket(sock); return 0; }
+    int err = 0; socklen_t el = sizeof(err);
+    getsockopt(sock, SOL_SOCKET, SO_ERROR, (char *)&err, &el);
+    if (err) { closesocket(sock); return 0; }
 
-    /* Blocking'e döndür + banner grab */
+    /* Bloklama moduna geri al + recv timeout */
 #ifdef PLATFORM_LINUX
-    fcntl(sock, F_SETFL, flags);
-    struct timeval tv_recv = { 1, 200000 }; /* 1200ms */
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv_recv, sizeof(tv_recv));
+    fcntl(sock, F_SETFL, fl);
+    struct timeval rtv = { 1, 200000 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
 #else
-    u_long bmode = 0;
-    ioctlsocket(sock, FIONBIO, &bmode);
-    int tmo = 1200;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&tmo, sizeof(tmo));
+    u_long bm = 0; ioctlsocket(sock, FIONBIO, &bm);
+    int t = 1200; setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&t, sizeof(t));
 #endif
 
-    memset(banner, 0, banner_sz);
-    int bytes = recv(sock, banner, banner_sz - 1, 0);
-    if (bytes > 0) {
-        banner[bytes] = '\0';
-        for (int i = 0; banner[i]; i++)
-            if ((unsigned char)banner[i] < 32 && banner[i] != '\n' && banner[i] != '\r')
-                banner[i] = '.';
-        
-        /* Banner'dan product/version çıkarma */
-        if (product && product_sz > 0) {
-            const char *p;
-            if ((p = strstr(banner, "SSH-")) != NULL) {
-                snprintf(product, product_sz, "%.50s", p);
-            } else if ((p = strstr(banner, "220 ")) != NULL) {
-                snprintf(product, product_sz, "%.50s", p + 4);
-            } else if ((p = strstr(banner, "Server:")) != NULL) {
-                snprintf(product, product_sz, "%.50s", p + 7);
-            } else {
-                snprintf(product, product_sz, "%.50s", banner);
+    /* Banner al */
+    if (banner && banner_sz > 0) {
+        banner[0] = '\0';
+        int n = recv(sock, banner, banner_sz - 1, 0);
+        if (n > 0) {
+            banner[n] = '\0';
+            for (int i = 0; banner[i]; i++)
+                if ((unsigned char)banner[i] < 32 && banner[i] != '\n' && banner[i] != '\r')
+                    banner[i] = '.';
+            if (product && product_sz > 0) {
+                const char *p;
+                if      ((p = strstr(banner, "SSH-")))    snprintf(product, product_sz, "%.60s", p);
+                else if ((p = strstr(banner, "220 ")))    snprintf(product, product_sz, "%.60s", p + 4);
+                else if ((p = strstr(banner, "Server:"))) snprintf(product, product_sz, "%.60s", p + 7);
+                else                                       snprintf(product, product_sz, "%.60s", banner);
             }
         }
     }
 
-    /* TTL */
+    /* TTL al (Linux'ta) */
     *ttl = 0;
 #ifdef PLATFORM_LINUX
-    int t = 0;
-    socklen_t tlen = sizeof(t);
-    if (getsockopt(sock, IPPROTO_IP, IP_TTL, &t, &tlen) == 0 && t > 0)
-        *ttl = t;
+    {
+        int tv2 = 0; socklen_t tl = sizeof(tv2);
+        getsockopt(sock, IPPROTO_IP, IP_TTL, &tv2, &tl);
+        *ttl = tv2;
+    }
 #endif
-
     closesocket(sock);
     return 1;
 }
 
-/* ========== SYN Scan (Raw Socket — Linux) ========== */
+/* ========== SYN / Stealth Scan (raw socket, sadece Linux) ========== */
 #ifdef PLATFORM_LINUX
-
-/* Pseudo header for TCP checksum */
-struct pseudo_hdr {
-    uint32_t src;
-    uint32_t dst;
-    uint8_t  zero;
-    uint8_t  proto;
-    uint16_t tcp_len;
-};
-
-static uint16_t _checksum(void *buf, int len) {
-    uint32_t sum = 0;
-    uint16_t *p = (uint16_t *)buf;
-    while (len > 1) { sum += *p++; len -= 2; }
-    if (len == 1) sum += *(uint8_t *)p;
-    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
-    return (uint16_t)~sum;
+static uint16_t _cksum(void *buf, int len) {
+    uint32_t s = 0; uint16_t *p = (uint16_t *)buf;
+    while (len > 1) { s += *p++; len -= 2; }
+    if (len) s += *(uint8_t *)p;
+    while (s >> 16) s = (s & 0xFFFF) + (s >> 16);
+    return (uint16_t)~s;
 }
 
-static uint32_t _get_local_ip(void) {
-    int s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) return 0;
-    struct sockaddr_in dst;
-    memset(&dst, 0, sizeof(dst));
-    dst.sin_family = AF_INET;
-    dst.sin_port   = htons(80);
-    inet_pton(AF_INET, "8.8.8.8", &dst.sin_addr);
-    connect(s, (struct sockaddr *)&dst, sizeof(dst));
-    struct sockaddr_in local;
-    socklen_t len = sizeof(local);
-    getsockname(s, (struct sockaddr *)&local, &len);
+static uint32_t _local_ip(void) {
+    int s = socket(AF_INET, SOCK_DGRAM, 0); if (s < 0) return 0;
+    struct sockaddr_in d; memset(&d, 0, sizeof(d));
+    d.sin_family = AF_INET; d.sin_port = htons(80);
+    inet_pton(AF_INET, "8.8.8.8", &d.sin_addr);
+    connect(s, (struct sockaddr *)&d, sizeof(d));
+    struct sockaddr_in l; socklen_t ln = sizeof(l);
+    getsockname(s, (struct sockaddr *)&l, &ln);
     close(s);
-    return local.sin_addr.s_addr;
+    return l.sin_addr.s_addr;
 }
 
-static int _raw_tcp_scan(uint32_t target_ip, int port, int tcp_flags,
+/* tcp_flags: TF_SYN / TF_FIN / TF_ACK vs. bileşimleri
+   frag: 0=normal, 1=IP fragmentasyonlu
+   Dönüş: 1=açık, 0=kapalı/filtrelenmiş, 2=filtrelenmiş(zaman aşımı) */
+static int _raw_tcp_scan(uint32_t target_ip, int port, int tcp_flags, int frag,
                          double *rtt, int *ttl) {
-    /* Stealth delay */
-    _stealth_delay();
+    _smart_delay();
 
-    int raw_send = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
-    int raw_recv = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
-    if (raw_send < 0 || raw_recv < 0) {
-        if (raw_send >= 0) close(raw_send);
-        if (raw_recv >= 0) close(raw_recv);
-        char b[4];
-        return _tcp_connect_scan(target_ip, port, b, sizeof(b), rtt, ttl, NULL, 0);
+    int rs = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    int rr = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
+    if (rs < 0 || rr < 0) {
+        /* raw socket yoksa connect scan'e düş */
+        char b[4]; return _tcp_connect_scan(target_ip, port, b, 4, rtt, ttl, NULL, 0);
     }
+    int on = 1; setsockopt(rs, IPPROTO_IP, IP_HDRINCL, &on, sizeof(on));
+    struct timeval tv = { PS_TIMEOUT_BASE / 1000, 0 };
+    setsockopt(rr, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    int on = 1;
-    setsockopt(raw_send, IPPROTO_IP, IP_HDRINCL, &on, sizeof(on));
+    uint32_t src = _local_ip();
+    uint16_t sp  = (uint16_t)(1024 + rand() % 64511);
+    int ttlv     = _rand_range(g_stealth.ttl_min, g_stealth.ttl_max);
 
-    int timeout_ms = PS_TIMEOUT_BASE + (g_stealth.scan_speed * 200);
-    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
-    setsockopt(raw_recv, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    if (!frag) {
+        /* Normal SYN/FIN/ACK paketi */
+        char pkt[40]; memset(pkt, 0, 40);
+        struct iphdr  *iph  = (struct iphdr *)pkt;
+        struct tcphdr *tcph = (struct tcphdr *)(pkt + 20);
+        iph->ihl = 5; iph->version = 4; iph->tot_len = htons(40);
+        iph->id = htons((uint16_t)rand());
+        iph->ttl = ttlv; iph->protocol = IPPROTO_TCP;
+        iph->saddr = src; iph->daddr = target_ip;
+        tcph->source = htons(sp); tcph->dest = htons((uint16_t)port);
+        tcph->seq  = htonl((uint32_t)rand()); tcph->doff = 5;
+        tcph->syn  = (tcp_flags & TF_SYN) ? 1 : 0;
+        tcph->fin  = (tcp_flags & TF_FIN) ? 1 : 0;
+        tcph->rst  = (tcp_flags & TF_RST) ? 1 : 0;
+        tcph->ack  = (tcp_flags & TF_ACK) ? 1 : 0;
+        tcph->psh  = (tcp_flags & TF_PSH) ? 1 : 0;
+        tcph->urg  = (tcp_flags & TF_URG) ? 1 : 0;
+        tcph->window = htons(65535);
+        /* Pseudo-header checksum */
+        struct { uint32_t s, d; uint8_t z, p; uint16_t l; } __attribute__((packed)) ph;
+        ph.s = src; ph.d = target_ip; ph.z = 0; ph.p = IPPROTO_TCP; ph.l = htons(20);
+        char cb[32]; memcpy(cb, &ph, 12); memcpy(cb + 12, tcph, 20);
+        tcph->check = _cksum(cb, 32);
 
-    uint32_t src_ip = _get_local_ip();
-    
-    /* Source port randomization */
-    uint16_t src_port = (uint16_t)(1024 + (rand() % 64511));
+        struct sockaddr_in da; memset(&da, 0, sizeof(da));
+        da.sin_family = AF_INET; da.sin_addr.s_addr = target_ip;
+        double t0 = _get_time_ms();
+        sendto(rs, pkt, 40, 0, (struct sockaddr *)&da, sizeof(da));
 
-    /* TTL randomization (stealth) */
-    int ttl_val = _rand_range(g_stealth.ttl_min, g_stealth.ttl_max);
+        char rbuf[512];
+        while (1) {
+            int n = recv(rr, rbuf, sizeof(rbuf), 0);
+            *rtt = _get_time_ms() - t0;
+            if (n < 40 || *rtt > PS_TIMEOUT_BASE + 500) break;
+            struct iphdr  *rip  = (struct iphdr *)rbuf;
+            int ihl = rip->ihl * 4; if (n < ihl + 20) continue;
+            struct tcphdr *rtcp = (struct tcphdr *)(rbuf + ihl);
+            if (rip->saddr != target_ip ||
+                ntohs(rtcp->source) != (uint16_t)port ||
+                ntohs(rtcp->dest)   != sp) continue;
+            *ttl = rip->ttl;
+            if ((tcp_flags & TF_SYN) && rtcp->syn && rtcp->ack) { close(rs); close(rr); return 1; }
+            if ((tcp_flags & TF_ACK) && rtcp->rst) { close(rs); close(rr); return ntohs(rtcp->window) > 0 ? 1 : 0; }
+            if (rtcp->rst) { close(rs); close(rr); return 0; }
+        }
+        close(rs); close(rr);
+        /* FIN/NULL/Xmas: zaman aşımı → filtrelenmiş */
+        if (!(tcp_flags & (TF_SYN | TF_ACK)) && *rtt >= PS_TIMEOUT_BASE) return 2;
+        return 0;
+    } else {
+        /* Fragmentasyonlu SYN — 2 parça */
+        uint16_t frag_id = (uint16_t)rand();
+        char f1[28]; memset(f1, 0, 28);
+        struct iphdr *ip1 = (struct iphdr *)f1;
+        ip1->ihl = 5; ip1->version = 4; ip1->tot_len = htons(28);
+        ip1->id = htons(frag_id); ip1->frag_off = htons(0x2000);
+        ip1->ttl = ttlv; ip1->protocol = IPPROTO_TCP;
+        ip1->saddr = src; ip1->daddr = target_ip;
+        struct tcphdr *t1 = (struct tcphdr *)(f1 + 20);
+        t1->source = htons(sp); t1->dest = htons((uint16_t)port);
+        t1->seq = htonl((uint32_t)rand()); t1->doff = 5;
+        t1->syn = 1; t1->window = htons(65535);
 
-    /* Paket oluştur */
-    char pkt[40];
-    memset(pkt, 0, sizeof(pkt));
+        char f2[32]; memset(f2, 0, 32);
+        struct iphdr *ip2 = (struct iphdr *)f2;
+        ip2->ihl = 5; ip2->version = 4; ip2->tot_len = htons(32);
+        ip2->id = htons(frag_id); ip2->frag_off = htons(1);
+        ip2->ttl = ttlv; ip2->protocol = IPPROTO_TCP;
+        ip2->saddr = src; ip2->daddr = target_ip;
+        uint16_t *fw = (uint16_t *)(f2 + 24); *fw = htons((1 << 9) | 65535);
+        struct { uint32_t s, d; uint8_t z, p; uint16_t l; } __attribute__((packed)) ph;
+        ph.s = src; ph.d = target_ip; ph.z = 0; ph.p = IPPROTO_TCP; ph.l = htons(20);
+        char cb[24]; memcpy(cb, &ph, 12); memset(cb + 12, 0, 4);
+        memcpy(cb + 12, f2 + 24, 8);
+        uint16_t chk = _cksum(cb, 20); memcpy(f2 + 30, &chk, 2);
 
-    struct iphdr *iph  = (struct iphdr *)pkt;
-    struct tcphdr *tcph = (struct tcphdr *)(pkt + 20);
+        struct sockaddr_in da; memset(&da, 0, sizeof(da));
+        da.sin_family = AF_INET; da.sin_addr.s_addr = target_ip;
+        double t0 = _get_time_ms();
+        sendto(rs, f1, 28, 0, (struct sockaddr *)&da, sizeof(da));
+        platform_sleep_ms(5);
+        sendto(rs, f2, 32, 0, (struct sockaddr *)&da, sizeof(da));
 
-    iph->ihl      = 5;
-    iph->version   = 4;
-    iph->tot_len   = htons(40);
-    iph->id        = htons((uint16_t)(rand() & 0xFFFF));
-    iph->ttl       = ttl_val;
-    iph->protocol  = IPPROTO_TCP;
-    iph->saddr     = src_ip;
-    iph->daddr     = target_ip;
-
-    tcph->source   = htons(src_port);
-    tcph->dest     = htons((uint16_t)port);
-    tcph->seq      = htonl((uint32_t)rand());
-    tcph->doff     = 5;
-    tcph->fin      = (tcp_flags & TF_FIN) ? 1 : 0;
-    tcph->syn      = (tcp_flags & TF_SYN) ? 1 : 0;
-    tcph->rst      = (tcp_flags & TF_RST) ? 1 : 0;
-    tcph->psh      = (tcp_flags & TF_PSH) ? 1 : 0;
-    tcph->ack      = (tcp_flags & TF_ACK) ? 1 : 0;
-    tcph->urg      = (tcp_flags & TF_URG) ? 1 : 0;
-    tcph->window   = htons(65535);
-
-    /* TCP checksum */
-    struct pseudo_hdr phdr;
-    phdr.src      = src_ip;
-    phdr.dst      = target_ip;
-    phdr.zero     = 0;
-    phdr.proto    = IPPROTO_TCP;
-    phdr.tcp_len  = htons(20);
-
-    char csum_buf[32];
-    memcpy(csum_buf, &phdr, 12);
-    memcpy(csum_buf + 12, tcph, 20);
-    tcph->check = _checksum(csum_buf, 32);
-
-    struct sockaddr_in dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family      = AF_INET;
-    dest.sin_addr.s_addr = target_ip;
-
-    double t0 = _get_time_ms();
-
-    if (sendto(raw_send, pkt, 40, 0, (struct sockaddr *)&dest, sizeof(dest)) < 0) {
-        close(raw_send);
-        close(raw_recv);
+        char rbuf[512];
+        while (1) {
+            int n = recv(rr, rbuf, sizeof(rbuf), 0);
+            *rtt = _get_time_ms() - t0;
+            if (n < 40 || *rtt > PS_TIMEOUT_BASE + 500) break;
+            struct iphdr  *rip  = (struct iphdr *)rbuf;
+            int ihl = rip->ihl * 4; if (n < ihl + 20) continue;
+            struct tcphdr *rtcp = (struct tcphdr *)(rbuf + ihl);
+            if (rip->saddr != target_ip ||
+                ntohs(rtcp->source) != (uint16_t)port ||
+                ntohs(rtcp->dest)   != sp) continue;
+            *ttl = rip->ttl;
+            if (rtcp->syn && rtcp->ack) { close(rs); close(rr); return 1; }
+            if (rtcp->rst)              { close(rs); close(rr); return 0; }
+        }
+        close(rs); close(rr);
         return 0;
     }
-
-    /* Response oku */
-    int result = 0;
-    char rbuf[512];
-    while (1) {
-        int n = recv(raw_recv, rbuf, sizeof(rbuf), 0);
-        double t1 = _get_time_ms();
-        *rtt = t1 - t0;
-
-        if (n < 40 || *rtt > timeout_ms) break;
-
-        struct iphdr *riph   = (struct iphdr *)rbuf;
-        int ip_hdr_len       = riph->ihl * 4;
-        if (n < ip_hdr_len + 20) continue;
-
-        struct tcphdr *rtcph = (struct tcphdr *)(rbuf + ip_hdr_len);
-
-        if (riph->saddr != target_ip)                  continue;
-        if (ntohs(rtcph->source) != (uint16_t)port)    continue;
-        if (ntohs(rtcph->dest) != src_port)            continue;
-
-        *ttl = riph->ttl;
-
-        /* SYN scan: SYN+ACK = open */
-        if ((tcp_flags & TF_SYN) && rtcph->syn && rtcph->ack) {
-            result = 1;
-            break;
-        }
-        /* ACK scan: open/unfiltered if RST back with non-zero window */
-        if ((tcp_flags & TF_ACK) && rtcph->rst) {
-            if (ntohs(rtcph->window) > 0)
-                result = 1; /* unfiltered */
-            else
-                result = 0; /* filtered */
-            break;
-        }
-        /* Window scan: window size check on RST */
-        if ((tcp_flags & (TF_ACK)) && rtcph->rst) {
-            result = ntohs(rtcph->window) > 0 ? 1 : 0;
-            break;
-        }
-        /* RST = closed */
-        if (rtcph->rst) {
-            result = 0;
-            break;
-        }
-        /* FIN/NULL/XMAS: RST yoksa → open|filtered */
-        break;
-    }
-
-    /* FIN/NULL/XMAS: timeout = open|filtered */
-    if (!(tcp_flags & TF_SYN) && !(tcp_flags & TF_ACK) && *rtt >= timeout_ms && result == 0)
-        result = 2; /* filtered */
-
-    close(raw_send);
-    close(raw_recv);
-    return result;
 }
-
-/* ========== Fragmentasyonlu SYN Scan ========== */
-static int _raw_tcp_scan_frag(uint32_t target_ip, int port,
-                              double *rtt, int *ttl) {
-    _stealth_delay();
-
-    int raw_send = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
-    int raw_recv = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
-    if (raw_send < 0 || raw_recv < 0) {
-        if (raw_send >= 0) close(raw_send);
-        if (raw_recv >= 0) close(raw_recv);
-        return _raw_tcp_scan(target_ip, port, TF_SYN, rtt, ttl);
-    }
-
-    int on = 1;
-    setsockopt(raw_send, IPPROTO_IP, IP_HDRINCL, &on, sizeof(on));
-
-    int timeout_ms = PS_TIMEOUT_BASE + 500;
-    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
-    setsockopt(raw_recv, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    uint32_t src_ip = _get_local_ip();
-    uint16_t src_port = (uint16_t)(1024 + (rand() % 64511));
-
-    /* Fragment 1: IP header + first 8 bytes of TCP */
-    char frag1[28];
-    memset(frag1, 0, sizeof(frag1));
-    struct iphdr *iph1 = (struct iphdr *)frag1;
-    iph1->ihl      = 5;
-    iph1->version   = 4;
-    iph1->tot_len   = htons(28);
-    iph1->id        = htons(0xDEAD);  /* same ID for both fragments */
-    iph1->frag_off  = htons(0x2000);  /* MF + offset 0 */
-    iph1->ttl       = _rand_range(g_stealth.ttl_min, g_stealth.ttl_max);
-    iph1->protocol  = IPPROTO_TCP;
-    iph1->saddr     = src_ip;
-    iph1->daddr     = target_ip;
-
-    /* First 8 bytes of TCP header (src port, dst port, seq) */
-    struct tcphdr *tcp1 = (struct tcphdr *)(frag1 + 20);
-    tcp1->source   = htons(src_port);
-    tcp1->dest     = htons((uint16_t)port);
-    tcp1->seq      = htonl((uint32_t)rand());
-    tcp1->doff     = 5;
-    tcp1->syn      = 1;
-    tcp1->window   = htons(65535);
-
-    /* Fragment 2: rest of TCP header */
-    char frag2[32];  /* 20 IP + 12 TCP remaining */
-    memset(frag2, 0, sizeof(frag2));
-    struct iphdr *iph2 = (struct iphdr *)frag2;
-    iph2->ihl      = 5;
-    iph2->version   = 4;
-    iph2->tot_len   = htons(32);
-    iph2->id        = htons(0xDEAD);
-    iph2->frag_off  = htons(0x0001);  /* offset 8 (8 bytes / 8 = 1) */
-    iph2->ttl       = iph1->ttl;
-    iph2->protocol  = IPPROTO_TCP;
-    iph2->saddr     = src_ip;
-    iph2->daddr     = target_ip;
-
-    /* Remaining 12 bytes of TCP (rest of header) */
-    char *tcp2_data = frag2 + 20;
-    memset(tcp2_data, 0, 12);
-    uint16_t *flags_window = (uint16_t *)(tcp2_data + 4);
-    *flags_window = htons((1 << 9) | 65535);  /* SYN flag + window */
-
-    /* Pseudo header checksum for fragment 2 */
-    struct pseudo_hdr phdr;
-    phdr.src      = src_ip;
-    phdr.dst      = target_ip;
-    phdr.zero     = 0;
-    phdr.proto    = IPPROTO_TCP;
-    phdr.tcp_len  = htons(20);
-
-    char csum_buf[32];
-    memcpy(csum_buf, &phdr, 12);
-    memset(csum_buf + 12, 0, 4);     /* src port already in frag1 */
-    memcpy(csum_buf + 12, tcp2_data, 12);
-    uint16_t check = _checksum(csum_buf, 24);
-    memcpy(tcp2_data + 6, &check, 2); /* checksum field */
-
-
-    struct sockaddr_in dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family      = AF_INET;
-    dest.sin_addr.s_addr = target_ip;
-
-    double t0 = _get_time_ms();
-
-    /* Send frag 1 */
-    sendto(raw_send, frag1, 28, 0, (struct sockaddr *)&dest, sizeof(dest));
-    /* Small delay between fragments */
-    platform_sleep_ms(10);
-    /* Send frag 2 */
-    sendto(raw_send, frag2, 32, 0, (struct sockaddr *)&dest, sizeof(dest));
-
-    /* Response */
-    int result = 0;
-    char rbuf[512];
-    while (1) {
-        int n = recv(raw_recv, rbuf, sizeof(rbuf), 0);
-        double t1 = _get_time_ms();
-        *rtt = t1 - t0;
-
-        if (n < 40 || *rtt > timeout_ms) break;
-
-        struct iphdr *riph = (struct iphdr *)rbuf;
-        int ip_hdr_len = riph->ihl * 4;
-        if (n < ip_hdr_len + 20) continue;
-
-        struct tcphdr *rtcph = (struct tcphdr *)(rbuf + ip_hdr_len);
-
-        if (riph->saddr != target_ip) continue;
-        if (ntohs(rtcph->source) != (uint16_t)port) continue;
-        if (ntohs(rtcph->dest) != src_port) continue;
-
-        *ttl = riph->ttl;
-
-        if (rtcph->syn && rtcph->ack) {
-            result = 1;
-            break;
-        }
-        if (rtcph->rst) {
-            result = 0;
-            break;
-        }
-    }
-
-    close(raw_send);
-    close(raw_recv);
-    return result;
-}
-
 #endif /* PLATFORM_LINUX */
 
-/* ========== Worker Thread ========== */
+/* ========== UDP Scan ========== */
+static int _udp_scan(uint32_t ip, int port, double *rtt) {
+    _smart_delay();
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return 0;
+    struct sockaddr_in a; memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET; a.sin_port = htons((uint16_t)port);
+    a.sin_addr.s_addr = ip;
+#ifdef PLATFORM_LINUX
+    struct timeval tv = { 2, 0 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+    char probe[8] = {0};
+    double t0 = _get_time_ms();
+    sendto(s, probe, 8, 0, (struct sockaddr *)&a, sizeof(a));
+    char buf[256]; struct sockaddr_in fr; socklen_t fl = sizeof(fr);
+    int n = recvfrom(s, buf, sizeof(buf), 0, (struct sockaddr *)&fr, &fl);
+    *rtt = _get_time_ms() - t0;
+    closesocket(s);
+    return (n > 0) ? 1 : 0;
+}
+
+/* ========== Worker thread ========== */
 typedef struct {
-    uint32_t ip;
-    int *ports;
-    int  port_count;
-    int  start_idx;
-    int  end_idx;
-    PortScanType scan_type;
-} ScanWorkerData;
+    uint32_t    ip;
+    int        *ports;
+    int         cnt;
+    PortScanType type;
+} WorkerData;
 
-static void *_scan_worker(void *arg) {
-    ScanWorkerData *wd = (ScanWorkerData *)arg;
+static void *_worker(void *arg) {
+    WorkerData *w = (WorkerData *)arg;
 
-    for (int i = wd->start_idx; i < wd->end_idx && g_scanner_running; i++) {
-        int port = wd->ports[i];
-        char banner[PS_MAX_BANNER] = {0};
-        char product[64] = {0};
-        double rtt = 0;
-        int ttl = 0;
-        int status = 0;
+    for (int i = 0; i < w->cnt && g_scanner_running; i++) {
+        int port = w->ports[i];
+        char banner[PS_MAX_BANNER] = {0}, product[64] = {0};
+        double rtt = 0.0; int ttl = 0, st = 0;
 
-        switch (wd->scan_type) {
+        switch (w->type) {
         case PS_SCAN_CONNECT:
-            status = _tcp_connect_scan(wd->ip, port, banner, sizeof(banner), &rtt, &ttl, product, sizeof(product));
+            st = _tcp_connect_scan(w->ip, port, banner, sizeof(banner), &rtt, &ttl, product, sizeof(product));
             break;
 #ifdef PLATFORM_LINUX
-        case PS_SCAN_SYN:
-            status = _raw_tcp_scan(wd->ip, port, TF_SYN, &rtt, &ttl);
-            break;
-        case PS_SCAN_SYN_FRAG:
-            status = _raw_tcp_scan_frag(wd->ip, port, &rtt, &ttl);
-            break;
-        case PS_SCAN_FIN:
-            status = _raw_tcp_scan(wd->ip, port, TF_FIN, &rtt, &ttl);
-            break;
-        case PS_SCAN_NULL:
-            status = _raw_tcp_scan(wd->ip, port, 0, &rtt, &ttl);
-            break;
-        case PS_SCAN_XMAS:
-            status = _raw_tcp_scan(wd->ip, port, TF_FIN | TF_URG | TF_PSH, &rtt, &ttl);
-            break;
-        case PS_SCAN_ACK:
-            status = _raw_tcp_scan(wd->ip, port, TF_ACK, &rtt, &ttl);
-            break;
-        case PS_SCAN_WINDOW:
-            status = _raw_tcp_scan(wd->ip, port, TF_ACK, &rtt, &ttl);
-            break;
-        case PS_SCAN_MAIMON:
-            status = _raw_tcp_scan(wd->ip, port, TF_FIN | TF_ACK, &rtt, &ttl);
-            break;
+        case PS_SCAN_SYN:      st = _raw_tcp_scan(w->ip, port, TF_SYN,              0, &rtt, &ttl); break;
+        case PS_SCAN_SYN_FRAG: st = _raw_tcp_scan(w->ip, port, TF_SYN,              1, &rtt, &ttl); break;
+        case PS_SCAN_FIN:      st = _raw_tcp_scan(w->ip, port, TF_FIN,              0, &rtt, &ttl); break;
+        case PS_SCAN_NULL:     st = _raw_tcp_scan(w->ip, port, 0,                   0, &rtt, &ttl); break;
+        case PS_SCAN_XMAS:     st = _raw_tcp_scan(w->ip, port, TF_FIN|TF_URG|TF_PSH,0, &rtt, &ttl); break;
+        case PS_SCAN_ACK:      st = _raw_tcp_scan(w->ip, port, TF_ACK,              0, &rtt, &ttl); break;
+        case PS_SCAN_WINDOW:   st = _raw_tcp_scan(w->ip, port, TF_ACK,              0, &rtt, &ttl); break;
+        case PS_SCAN_MAIMON:   st = _raw_tcp_scan(w->ip, port, TF_FIN|TF_ACK,       0, &rtt, &ttl); break;
 #endif
-        case PS_SCAN_UDP: {
-            _stealth_delay();
-            SOCKET us = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-            if (us != INVALID_SOCKET) {
-                struct sockaddr_in a;
-                memset(&a, 0, sizeof(a));
-                a.sin_family      = AF_INET;
-                a.sin_port        = htons((unsigned short)port);
-                a.sin_addr.s_addr = wd->ip;
-#ifdef PLATFORM_LINUX
-                struct timeval tv = { 2, 0 };
-                setsockopt(us, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-#else
-                int tmo = 2000;
-                setsockopt(us, SOL_SOCKET, SO_RCVTIMEO, (char*)&tmo, sizeof(tmo));
-#endif
-                char probe[8] = {0};
-                double t0 = _get_time_ms();
-                sendto(us, probe, 8, 0, (struct sockaddr *)&a, sizeof(a));
-                char resp[256];
-                struct sockaddr_in from;
-                socklen_t flen = sizeof(from);
-                int n = recvfrom(us, resp, sizeof(resp), 0,
-                                 (struct sockaddr *)&from, &flen);
-                rtt = _get_time_ms() - t0;
-                status = (n > 0) ? 1 : 0;
-                if (n > 0) {
-                    memcpy(banner, resp, n > PS_MAX_BANNER-1 ? PS_MAX_BANNER-1 : n);
-                    banner[n > PS_MAX_BANNER-1 ? PS_MAX_BANNER-1 : n] = '\0';
-                }
-                closesocket(us);
-            }
-            break;
-        }
+        case PS_SCAN_UDP: st = _udp_scan(w->ip, port, &rtt); break;
         default:
-            status = _tcp_connect_scan(wd->ip, port, banner, sizeof(banner), &rtt, &ttl, product, sizeof(product));
+            st = _tcp_connect_scan(w->ip, port, banner, sizeof(banner), &rtt, &ttl, product, sizeof(product));
             break;
         }
 
-        /* Sonucu kaydet */
         platform_mutex_lock(&g_results.lock);
-        
-        if (status > 0 && g_results.open_count < PS_MAX_RESULTS) {
+        if (st > 0 && g_results.open_count < PS_MAX_RESULTS) {
             PortResult *pr = &g_results.ports[g_results.open_count];
             memset(pr, 0, sizeof(PortResult));
             pr->port   = port;
-            pr->status = (status == 1) ? PORT_OPEN : PORT_FILTERED;
+            pr->status = (st == 1) ? PORT_OPEN : PORT_FILTERED;
             strncpy(pr->service, portscan_service_name(port), sizeof(pr->service) - 1);
-            strncpy(pr->banner,  banner, sizeof(pr->banner) - 1);
-            if (strlen(product) > 0)
-                strncpy(pr->product, product, sizeof(pr->product) - 1);
-            pr->rtt_ms = rtt;
-            pr->ttl    = ttl;
+            strncpy(pr->banner,  banner,  sizeof(pr->banner)  - 1);
+            if (*product) strncpy(pr->product, product, sizeof(pr->product) - 1);
+            pr->rtt_ms = rtt; pr->ttl = ttl;
 
-            /* OS tahmini */
-            if (ttl > 0) {
-                if (g_results.os_guess[0] == '\0') {
-                    strncpy(g_results.os_guess, portscan_guess_os(ttl),
-                            sizeof(g_results.os_guess) - 1);
-                    g_results.os_confidence = 60;
-                }
+            /* OS tahmini (ilk TTL'den) */
+            if (ttl > 0 && !g_results.os_guess[0]) {
+                strncpy(g_results.os_guess, portscan_guess_os(ttl), sizeof(g_results.os_guess) - 1);
+                g_results.os_confidence = 60;
             }
 
-            /* SSL algılama banner'dan */
-            if (strstr(banner, "OK") || strstr(banner, "SSL") || 
-                strstr(banner, "TLS") || (port == 443) || (port == 8443) ||
-                (port == 993) || (port == 995) || (port == 465) || (port == 636))
+            /* SSL algılama */
+            static const int ssl_ports[] = { 443,8443,993,995,465,636,2376,5986,0 };
+            for (const int *sp = ssl_ports; *sp; sp++)
+                if (port == *sp) { pr->is_ssl = 1; break; }
+            if (!pr->is_ssl && (strstr(banner,"SSL") || strstr(banner,"TLS")))
                 pr->is_ssl = 1;
 
-            /* Servis versiyon bilgisini product'dan çıkar */
-            const char *ver = NULL;
+            /* Versiyon çıkar (SSH) */
             if (strstr(product, "SSH-")) {
-                ver = product + 4;
-                char *space = strchr(ver, ' ');
-                if (space) *space = '\0';
-                strncpy(pr->version, ver, sizeof(pr->version) - 1);
-
-                /* Servis adını düzelt: SSH */
-                if (strstr(pr->service, "unknown") || strcmp(pr->service, "ssh-alt") == 0)
-                    strncpy(pr->service, "ssh", sizeof(pr->service) - 1);
+                char *v = product + 4;
+                char *sep = strchr(v, ' ');
+                if (sep) *sep = '\0';
+                strncpy(pr->version, v, sizeof(pr->version) - 1);
             }
 
-            /* Zafiyet tara */
-            pr->vuln_count = portscan_lookup_vulns(
-                pr->service,
-                pr->version[0] ? pr->version : NULL,
-                pr->vulns, 8);
-
+            pr->vuln_count = portscan_lookup_vulns(pr->service, pr->version, pr->vulns, 8);
             g_results.open_count++;
-        } else if (status == 0) {
+        } else if (st == 0) {
             g_results.closed_count++;
         }
-
         g_results.total_scanned++;
         platform_mutex_unlock(&g_results.lock);
     }
 
-    free(wd->ports);
-    free(wd);
+    free(w->ports);
+    free(w);
     return NULL;
 }
 
-/* ========== Tarama Yöneticisi Thread ========== */
-typedef struct {
-    char ip_str[MAX_IP_LEN];
-    PortScanType type;
-    int *ports;
-    int  port_count;
-} ScanManagerData;
-
-/* Port listesini karıştır (Fisher-Yates) */
-static void _shuffle_ports(int *ports, int count) {
+/* ========== Fisher-Yates karıştırma ========== */
+static void _shuffle(int *a, int n) {
     if (!g_stealth.randomize_port_order) return;
-    for (int i = count - 1; i > 0; i--) {
+    for (int i = n - 1; i > 0; i--) {
         int j = rand() % (i + 1);
-        int tmp = ports[i];
-        ports[i] = ports[j];
-        ports[j] = tmp;
+        int t = a[i]; a[i] = a[j]; a[j] = t;
     }
 }
+
+/* ========== Manager thread ========== */
+typedef struct {
+    char         ip_str[MAX_IP_LEN];
+    PortScanType type;
+    int         *ports;
+    int          port_count;
+} ScanManagerData;
 
 static void *_scan_manager(void *arg) {
     ScanManagerData *md = (ScanManagerData *)arg;
@@ -1670,50 +1425,43 @@ static void *_scan_manager(void *arg) {
     memset(&g_results, 0, sizeof(g_results));
     platform_mutex_init(&g_results.lock);
     strncpy(g_results.target_ip, md->ip_str, MAX_IP_LEN - 1);
-    g_results.scan_type    = md->type;
-    g_results.is_scanning  = 1;
-    g_results.scan_complete = 0;
-    g_results.total_target_ports = md->port_count;
-    g_results.stealth       = g_stealth;
+    g_results.scan_type         = md->type;
+    g_results.is_scanning       = 1;
+    g_results.total_target_ports= md->port_count;
+    g_results.stealth           = g_stealth;
     platform_mutex_unlock(&g_results.lock);
 
     uint32_t ip = inet_addr(md->ip_str);
+    _shuffle(md->ports, md->port_count);
+
     double t0 = _get_time_ms();
 
-    /* Port listesini karıştır (stealth) */
-    _shuffle_ports(md->ports, md->port_count);
-
+    /* Thread sayısı: speed <= 1 → 2 thread, aksi halde PS_MAX_THREADS */
     int total = md->port_count;
-    int nthreads = g_stealth.scan_speed <= 1 ? 2 : PS_MAX_THREADS;
-    if (nthreads > total) nthreads = total;
-    if (nthreads < 1) nthreads = 1;
+    int nt = (g_stealth.scan_speed <= 1) ? 2 : PS_MAX_THREADS;
+    if (nt > total) nt = total;
+    if (nt < 1)     nt = 1;
 
-    int per_thread = total / nthreads;
-    int remainder  = total % nthreads;
+    int pt = total / nt;
+    int rm = total % nt;
 
     platform_thread_t threads[PS_MAX_THREADS];
-    int tcount = 0;
-    int idx = 0;
+    int tc = 0, idx = 0;
 
-    for (int i = 0; i < nthreads && g_scanner_running; i++) {
-        int cnt = per_thread + (i < remainder ? 1 : 0);
+    for (int i = 0; i < nt && g_scanner_running; i++) {
+        int cnt = pt + (i < rm ? 1 : 0);
         if (cnt <= 0) continue;
-
-        ScanWorkerData *wd = (ScanWorkerData *)malloc(sizeof(ScanWorkerData));
-        wd->ip        = ip;
-        wd->scan_type = md->type;
-        wd->start_idx = 0;
-        wd->end_idx   = cnt;
-        wd->ports      = (int *)malloc(cnt * sizeof(int));
-        wd->port_count = cnt;
-        memcpy(wd->ports, md->ports + idx, cnt * sizeof(int));
-
-        platform_thread_create(&threads[tcount], _scan_worker, wd);
-        tcount++;
+        WorkerData *w = calloc(1, sizeof(WorkerData));
+        w->ip    = ip;
+        w->type  = md->type;
+        w->cnt   = cnt;
+        w->ports = malloc(cnt * sizeof(int));
+        memcpy(w->ports, md->ports + idx, cnt * sizeof(int));
+        platform_thread_create(&threads[tc++], _worker, w);
         idx += cnt;
     }
 
-    for (int i = 0; i < tcount; i++) {
+    for (int i = 0; i < tc; i++) {
 #ifdef PLATFORM_LINUX
         pthread_join(threads[i], NULL);
 #else
@@ -1722,18 +1470,13 @@ static void *_scan_manager(void *arg) {
 #endif
     }
 
-    double t1 = _get_time_ms();
-
     platform_mutex_lock(&g_results.lock);
-    g_results.scan_time_sec = (t1 - t0) / 1000.0;
-    g_results.is_scanning   = 0;
-    g_results.scan_complete = 1;
-
-    /* Toplam zafiyet sayısını hesapla */
+    g_results.scan_time_sec  = (_get_time_ms() - t0) / 1000.0;
+    g_results.is_scanning    = 0;
+    g_results.scan_complete  = 1;
     g_results.total_vulns_found = 0;
     for (int i = 0; i < g_results.open_count; i++)
         g_results.total_vulns_found += g_results.ports[i].vuln_count;
-
     platform_mutex_unlock(&g_results.lock);
 
     free(md->ports);
@@ -1742,6 +1485,7 @@ static void *_scan_manager(void *arg) {
 }
 
 /* ========== Public API ========== */
+
 void portscan_init(void) {
     if (g_initialized) return;
     memset(&g_results, 0, sizeof(g_results));
@@ -1753,8 +1497,7 @@ void portscan_init(void) {
 
 void portscan_cleanup(void) {
     g_scanner_running = 0;
-    platform_sleep_ms(500);
-    platform_mutex_destroy(&g_results.lock);
+    platform_sleep_ms(200);
     g_initialized = 0;
 }
 
@@ -1765,18 +1508,16 @@ void portscan_set_stealth(StealthConfig cfg) {
 void portscan_start(const char *target_ip, PortScanType type,
                     int start_port, int end_port) {
     if (g_results.is_scanning) return;
-    g_scanner_running = 1;
-
     int total = end_port - start_port + 1;
     if (total <= 0 || total > 65535) return;
+    g_scanner_running = 1;
 
-    ScanManagerData *md = (ScanManagerData *)malloc(sizeof(ScanManagerData));
+    ScanManagerData *md = malloc(sizeof(ScanManagerData));
     strncpy(md->ip_str, target_ip, MAX_IP_LEN - 1);
     md->type       = type;
     md->port_count = total;
-    md->ports      = (int *)malloc(total * sizeof(int));
-    for (int i = 0; i < total; i++)
-        md->ports[i] = start_port + i;
+    md->ports      = malloc(total * sizeof(int));
+    for (int i = 0; i < total; i++) md->ports[i] = start_port + i;
 
     platform_thread_t t;
     platform_thread_create(&t, _scan_manager, md);
@@ -1784,61 +1525,22 @@ void portscan_start(const char *target_ip, PortScanType type,
 }
 
 void portscan_start_top(const char *target_ip, PortScanType type) {
-    /* Top 100 port - gerçek dünya istatistiklerine göre en sık açık portlar */
-    static const int top_ports[] = {
-        21,22,23,25,53,80,110,111,135,139,143,389,443,445,465,500,
-        502,514,587,593,631,636,993,995,1080,1099,1194,1352,1433,
-        1521,1723,2049,2100,2222,2375,2376,2443,2483,2484,2628,
-        3000,3128,3306,3389,3541,3689,3702,4000,4443,4444,4500,
-        4848,5000,5001,5060,5222,5353,5432,5555,5600,5631,5632,
-        5800,5900,5985,5986,6000,6001,6379,6443,6660,6661,6662,
-        6663,6664,6665,6666,6667,6668,6669,7001,7002,7071,8000,
-        8008,8009,8010,8020,8080,8081,8085,8088,8090,8181,8222,
-        8332,8333,8400,8443,8888,9000,9001,9042,9060,9080,9090,
-        9092,9100,9200,9300,9418,9443,9696,9876,9999,10000,10001,
-        10009,11211,12345,15672,16010,16379,17000,18091,18092,
-        20000,20720,21320,22000,22222,23456,25565,25672,27017,
-        28015,28080,30718,31337,32400,32764,32768,32769,32770,
-        32771,32772,32773,32774,32775,32776,32777,32778,32779,
-        32780,32800,33333,33434,34571,34572,34573,35500,38292,
-        40000,40001,40002,40193,40911,41511,41951,42111,42855,
-        44101,44273,44334,44818,44944,45000,45001,45002,45003,
-        45367,47000,47001,47544,47806,47808,49152,49153,49154,
-        49155,49156,49157,49158,49159,49160,49161,49162,49163,
-        49164,49165,49166,49167,49168,49169,49170,49171,49172,
-        49173,49174,49175,49176,49177,49178,49179,49180,49181,
-        49182,49183,49184,49185,49186,49187,49188,49189,49190,
-        49191,49192,49193,49194,49195,49196,49197,49198,49199,
-        49200,49201,49202,49203,49204,49205,49206,49207,49208,
-        49209,49210,49211,49212,49213,49214,49215,49216,49217,
-        49218,49219,49220,49221,49222,49223,49224,49225,49226,
-        49227,49228,49229,49230,49231,49232,49233,49234,49235,
-        49236,49237,49238,49239,49240,49241,49242,49243,49244,
-        49245,49246,49247,49248,49249,49250,49251,49252,49253,
-        49254,49255,49256,49257,49258,49259,49260,49261,49262,
-        49263,49264,49265,49266,49267,49268,49269,49270,49271,
-        49272,49273,49274,49275,49276,49277,49278,49279,49280,
-        49281,49282,49283,49284,49285,49286,49287,49288,49289,
-        49290,49291,49292,49293,49294,49295,49296,49297,49298,
-        49299,49300,49301,49302,49303,49304,49305,49306,49307,
-        49308,49309,49310,49311,49312,49313,49314,49315,49316,
-        49317,49318,49319,49320,49321,49322,49323,49324,49325,
-        49326,49327,49328,49329,49330,49331,49332,49333,49334,
-        49335,49336,49337,49338,49339,49340,49341,49342,49343,
-        49344,49345,49346,49347,49348,49349,49350,49351,49352,
-        49353,49354,49355,49356,49357,49358,49359,49360
+    static const int top[] = {
+        21,22,23,25,53,80,110,111,135,139,143,389,443,445,465,500,502,514,
+        587,593,631,636,993,995,1080,1194,1433,1521,1723,2049,2222,2375,2376,
+        3306,3389,5432,5900,5985,5986,6379,8080,8443,9000,9090,9200,10000,
+        11211,27017,0
     };
-    int total = sizeof(top_ports) / sizeof(top_ports[0]);
-
     if (g_results.is_scanning) return;
     g_scanner_running = 1;
+    int n = 0; while (top[n]) n++;
 
-    ScanManagerData *md = (ScanManagerData *)malloc(sizeof(ScanManagerData));
+    ScanManagerData *md = malloc(sizeof(ScanManagerData));
     strncpy(md->ip_str, target_ip, MAX_IP_LEN - 1);
     md->type       = type;
-    md->port_count = total;
-    md->ports      = (int *)malloc(total * sizeof(int));
-    memcpy(md->ports, top_ports, total * sizeof(int));
+    md->port_count = n;
+    md->ports      = malloc(n * sizeof(int));
+    memcpy(md->ports, top, n * sizeof(int));
 
     platform_thread_t t;
     platform_thread_create(&t, _scan_manager, md);
@@ -1850,11 +1552,11 @@ void portscan_start_list(const char *target_ip, PortScanType type,
     if (g_results.is_scanning || !ports || port_count <= 0) return;
     g_scanner_running = 1;
 
-    ScanManagerData *md = (ScanManagerData *)malloc(sizeof(ScanManagerData));
+    ScanManagerData *md = malloc(sizeof(ScanManagerData));
     strncpy(md->ip_str, target_ip, MAX_IP_LEN - 1);
     md->type       = type;
     md->port_count = port_count;
-    md->ports      = (int *)malloc(port_count * sizeof(int));
+    md->ports      = malloc(port_count * sizeof(int));
     memcpy(md->ports, ports, port_count * sizeof(int));
 
     platform_thread_t t;
@@ -1871,3 +1573,4 @@ void portscan_get_results(PortScanResults *out) {
 void portscan_stop(void) {
     g_scanner_running = 0;
 }
+

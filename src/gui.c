@@ -3,7 +3,6 @@
  */
 #include "gui.h"
 #include "arp_scanner.h"
-#include "brute_force.h"
 #include "pcap_agent.h"
 #include "network_monitor.h"
 #include "platform.h"
@@ -34,13 +33,12 @@ static PortScanResults g_portscan;
 static float g_scroll_pcap_flows = 0;
 static float g_scroll_device_detail = 0;
 
-static int g_tools_subtab = 0;         /* 0=Paket Izleme, 1=Port Tarayici, 2=Brute Force */
+static int g_tools_subtab = 0;         /* 0=Paket Izleme, 1=Port Tarayici */
 static float g_scroll_tool_ports = 0;
 static int g_selected_packet_num = -1;
 static float g_scroll_pdu_detail = 0;
 static int g_ps_selected_vuln_port = -1; /* secili port vulnerability detail */
 static float g_scroll_ps_devices = 0;    /* port scanner cihaz listesi scroll */
-static float g_scroll_bf_devices = 0;    /* brute force cihaz listesi scroll */
 static int g_selected_layer = -1;
 static char g_capture_active_ip[MAX_IP_LEN] = {0}; /* aktif trafik izleme yapilan cihaz */
 static float g_scroll_nm_devices = 0;    /* network monitor cihaz listesi scroll */
@@ -558,21 +556,17 @@ static void draw_panel_security(int W, int H) {
                         g_pa_alert_count * item_h, &g_scroll_alerts);
 }
 
-/* ========== Araclar Paneli (Port Scan + Brute Force) ========== */
-static BfState g_bf_state;
-static int g_bf_proto_sel = 5; /* BfProtocol enum index: 5=SSH */
-static char g_bf_target[MAX_IP_LEN] = {0};
-static int g_bf_port_override = 0; /* 0 = varsayilan port */
-static int g_bf_threads = 10;
-static float g_scroll_bf_results = 0;
+/* ========== Araclar Paneli (Port Scan) ========== */
+static char g_ps_target[MAX_IP_LEN] = {0};
+static float g_scroll_ps_results = 0;
 
 static void draw_panel_tools(int W, int H) {
   int y0 = 86;
 
   /* Subtabs */
-  const char *stabs[] = {"Paket Izleme", "Port Tarayici", "Brute Force"};
+  const char *stabs[] = {"Paket Izleme", "Port Tarayici"};
   int stx = 16;
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 2; i++) {
     int sw = MeasureText(stabs[i], 12) + 20;
     Rectangle sb = {stx, y0, sw, 22};
     int sh = CheckCollisionPointRec(GetMousePosition(), sb);
@@ -979,18 +973,18 @@ static void draw_panel_tools(int W, int H) {
 
     portscan_get_results(&g_portscan);
     int is_this =
-        (g_bf_target[0] && strcmp(g_portscan.target_ip, g_bf_target) == 0);
+        (g_ps_target[0] && strcmp(g_portscan.target_ip, g_ps_target) == 0);
     int scanning = (is_this && g_portscan.is_scanning);
 
     int cy = py + 28;
 
     /* --- Hedef IP secimi (scrollable liste) --- */
     DrawTextC("Hedef:", 24, cy, 10, COLOR_TEXT_SEC);
-    if (g_bf_target[0]) {
+    if (g_ps_target[0]) {
       DrawRectangleRounded(
-          (Rectangle){64, cy - 2, MeasureText(g_bf_target, 10) + 10, 14}, 0.4f,
+          (Rectangle){64, cy - 2, MeasureText(g_ps_target, 10) + 10, 14}, 0.4f,
           4, COLOR_SELECTED);
-      DrawTextC(g_bf_target, 69, cy, 10, COLOR_ACCENT);
+      DrawTextC(g_ps_target, 69, cy, 10, COLOR_ACCENT);
     }
     cy += 16;
 
@@ -1014,7 +1008,7 @@ static void draw_panel_tools(int W, int H) {
       if (iy + item_h < cy || iy > cy + ip_list_h)
         continue;
       Rectangle db = {22, iy + 1, ctrl_w - 44, item_h - 2};
-      int sel = (strcmp(g_bf_target, g_scan.devices[i].ip) == 0);
+      int sel = (strcmp(g_ps_target, g_scan.devices[i].ip) == 0);
       int hov = CheckCollisionPointRec(GetMousePosition(), db);
       if (sel)
         DrawRectangleRounded(db, 0.2f, 4, COLOR_SELECTED);
@@ -1025,7 +1019,7 @@ static void draw_panel_tools(int W, int H) {
       DrawTextC(g_scan.devices[i].ip, db.x + 10, db.y + 4, 10,
                 sel ? COLOR_ACCENT : COLOR_TEXT);
       if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
-        strncpy(g_bf_target, g_scan.devices[i].ip, MAX_IP_LEN - 1);
+        strncpy(g_ps_target, g_scan.devices[i].ip, MAX_IP_LEN - 1);
     }
     EndScissorMode();
     draw_custom_scrollbar(ip_area.x + ip_area.width - 10, ip_area.y, 10,
@@ -1037,7 +1031,7 @@ static void draw_panel_tools(int W, int H) {
     cy += 8;
 
     /* --- Tarama butonlari --- */
-    if (g_bf_target[0] == '\0') {
+    if (g_ps_target[0] == '\0') {
       DrawTextC("Bir hedef IP secin.", 24, cy + 4, 11, COLOR_TEXT_DIM);
       cy += 20;
     } else if (!scanning) {
@@ -1045,14 +1039,14 @@ static void draw_panel_tools(int W, int H) {
       cy += 16;
       int bw = (ctrl_w - 56) / 2;
       if (GuiButton((Rectangle){24, cy, bw, 26}, "Top Portlar"))
-        portscan_start_top(g_bf_target, PS_SCAN_CONNECT);
+        portscan_start_top(g_ps_target, PS_SCAN_CONNECT);
       if (GuiButton((Rectangle){28 + bw, cy, bw, 26}, "1 - 1024"))
-        portscan_start(g_bf_target, PS_SCAN_CONNECT, 1, 1024);
+        portscan_start(g_ps_target, PS_SCAN_CONNECT, 1, 1024);
       cy += 30;
       if (GuiButton((Rectangle){24, cy, bw, 26}, "1 - 10000"))
-        portscan_start(g_bf_target, PS_SCAN_CONNECT, 1, 10000);
+        portscan_start(g_ps_target, PS_SCAN_CONNECT, 1, 10000);
       if (GuiButton((Rectangle){28 + bw, cy, bw, 26}, "Tam (65535)"))
-        portscan_start(g_bf_target, PS_SCAN_CONNECT, 1, 65535);
+        portscan_start(g_ps_target, PS_SCAN_CONNECT, 1, 65535);
       cy += 34;
     } else {
       /* Progress bar */
@@ -1105,7 +1099,7 @@ static void draw_panel_tools(int W, int H) {
         snprintf(buf, sizeof(buf), "Zafiyet: %d", g_portscan.total_vulns_found);
         DrawTextC(buf, 24, cy, 10, COLOR_RED);
       }
-    } else if (g_bf_target[0] && !is_this && !scanning) {
+    } else if (g_ps_target[0] && !is_this && !scanning) {
       DrawTextC("Sonuc yok.", 24, cy, 10, COLOR_TEXT_DIM);
     }
 
@@ -1115,8 +1109,8 @@ static void draw_panel_tools(int W, int H) {
                      COLOR_BORDER);
     DrawTextC("Tarama Sonuclari", rx + 12, py + 8, 13, COLOR_ACCENT);
 
-    if (is_this && g_bf_target[0]) {
-      snprintf(buf, sizeof(buf), "%s", g_bf_target);
+    if (is_this && g_ps_target[0]) {
+      snprintf(buf, sizeof(buf), "%s", g_ps_target);
       int bw2 = MeasureText(buf, 9);
       DrawTextC(buf, rx + result_w - bw2 - 12, py + 10, 9, COLOR_TEXT_DIM);
     }
@@ -1290,231 +1284,6 @@ static void draw_panel_tools(int W, int H) {
       EndScissorMode();
       draw_custom_scrollbar(rx + result_w - 10, list_y0, 10, list_h, total_h,
                             &g_scroll_tool_ports);
-    }
-  } else if (g_tools_subtab == 2) {
-    /* === Brute Force === */
-    bf_get_state(&g_bf_state);
-    int cw = (W - 36) / 4;
-
-    snprintf(buf, sizeof(buf), "%d/%d", g_bf_state.tested_combos,
-             g_bf_state.total_combos);
-    draw_stat_card((Rectangle){12, py, cw - 4, 66}, "Ilerleme", buf,
-                   g_bf_state.is_running ? COLOR_AMBER : COLOR_ACCENT,
-                   g_bf_state.is_running ? "Tarama devam ediyor" : "Hazir");
-
-    snprintf(buf, sizeof(buf), "%d", g_bf_state.result_count);
-    draw_stat_card((Rectangle){12 + cw, py, cw - 4, 66}, "Bulunan", buf,
-                   g_bf_state.result_count > 0 ? COLOR_RED : COLOR_GREEN,
-                   g_bf_state.result_count > 0 ? "Zayif Kimlik!" : "Temiz");
-
-    snprintf(buf, sizeof(buf), "%.1fs", g_bf_state.elapsed_sec);
-    draw_stat_card((Rectangle){12 + cw * 2, py, cw - 4, 66}, "Sure", buf,
-                   COLOR_ACCENT2, "Gecen sure");
-
-    snprintf(buf, sizeof(buf), "%d", g_bf_state.thread_count);
-    draw_stat_card((Rectangle){12 + cw * 3, py, cw - 4, 66}, "Thread", buf,
-                   COLOR_TEXT, "Paralel islem");
-
-    py += 74;
-    panel_h = H - py - 12;
-
-    int ctrl_w = 340;
-    int result_w = W - 24 - ctrl_w - 8;
-
-    /* --- Sol panel: Kontroller --- */
-    DrawRoundedPanel((Rectangle){12, py, ctrl_w, panel_h}, COLOR_PANEL,
-                     COLOR_BORDER);
-    DrawTextC("Saldiri Ayarlari", 24, py + 8, 13, COLOR_ACCENT);
-
-    int cy = py + 32;
-
-    /* --- Hedef IP secimi (scrollable liste) --- */
-    DrawTextC("Hedef:", 24, cy, 10, COLOR_TEXT_SEC);
-    if (g_bf_target[0]) {
-      DrawRectangleRounded(
-          (Rectangle){64, cy - 2, MeasureText(g_bf_target, 10) + 10, 14}, 0.4f,
-          4, COLOR_SELECTED);
-      DrawTextC(g_bf_target, 69, cy, 10, COLOR_ACCENT);
-    }
-    cy += 16;
-
-    int ip_list_h = 80;
-    Rectangle ip_area = {20, cy, ctrl_w - 28, ip_list_h};
-    DrawRectangleRounded(ip_area, 0.04f, 4, COLOR_SURFACE);
-    int item_h = 20;
-    float ip_max_scroll = g_scan.device_count * item_h - ip_list_h;
-    if (ip_max_scroll < 0)
-      ip_max_scroll = 0;
-    if (CheckCollisionPointRec(GetMousePosition(), ip_area)) {
-      g_scroll_bf_devices -= GetMouseWheelMove() * 20;
-      if (g_scroll_bf_devices < 0)
-        g_scroll_bf_devices = 0;
-      if (g_scroll_bf_devices > ip_max_scroll)
-        g_scroll_bf_devices = ip_max_scroll;
-    }
-    BeginScissorModeScaled(ip_area.x, ip_area.y, ip_area.width, ip_area.height);
-    for (int i = 0; i < g_scan.device_count; i++) {
-      int iy = cy + i * item_h - (int)g_scroll_bf_devices;
-      if (iy + item_h < cy || iy > cy + ip_list_h)
-        continue;
-      Rectangle db = {22, iy + 1, ctrl_w - 44, item_h - 2};
-      int sel = (strcmp(g_bf_target, g_scan.devices[i].ip) == 0);
-      int hov = CheckCollisionPointRec(GetMousePosition(), db);
-      if (sel)
-        DrawRectangleRounded(db, 0.2f, 4, COLOR_SELECTED);
-      else if (hov)
-        DrawRectangleRounded(db, 0.2f, 4, COLOR_PANEL_HOVER);
-      if (sel)
-        DrawRectangle(db.x, db.y + 3, 3, db.height - 6, COLOR_ACCENT);
-      DrawTextC(g_scan.devices[i].ip, db.x + 10, db.y + 4, 10,
-                sel ? COLOR_ACCENT : COLOR_TEXT);
-      if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
-        strncpy(g_bf_target, g_scan.devices[i].ip, MAX_IP_LEN - 1);
-    }
-    EndScissorMode();
-    draw_custom_scrollbar(ip_area.x + ip_area.width - 10, ip_area.y, 10,
-                          ip_list_h, g_scan.device_count * item_h,
-                          &g_scroll_bf_devices);
-    cy += ip_list_h + 8;
-
-    DrawRectangle(24, cy, ctrl_w - 40, 1, COLOR_BORDER);
-    cy += 12;
-
-    /* Protokol Secimi — BfProtocol enum sirasina gore */
-    DrawTextC("Protokol:", 24, cy, 11, COLOR_TEXT_SEC);
-    cy += 16;
-    /* BF_PROTO_FTP=0, HTTP_POST=1, HTTP_GET=2, MYSQL=3, TELNET=4, SSH=5, SMB=6,
-     * RDP=7 */
-    const char *proto_labels[] = {"FTP",    "HTTP-P", "HTTP-G", "MySQL",
-                                  "Telnet", "SSH",    "SMB",    "RDP"};
-    for (int i = 0; i < 8; i++) {
-      int bx = 24 + (i % 4) * 76;
-      int by = cy + (i / 4) * 24;
-      Rectangle pb = {bx, by, 72, 20};
-      int sel = (g_bf_proto_sel == i);
-      int hover = CheckCollisionPointRec(GetMousePosition(), pb);
-      Color bg = sel ? COLOR_SELECTED
-                     : (hover ? COLOR_PANEL_HOVER : (Color){20, 28, 48, 255});
-      DrawRectangleRounded(pb, 0.3f, 4, bg);
-      if (sel)
-        DrawRectangle(bx, by + 18, 72, 2, COLOR_ACCENT);
-      DrawTextC(proto_labels[i], bx + 4, by + 5, 9,
-                sel ? COLOR_ACCENT : COLOR_TEXT_DIM);
-      if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
-        g_bf_proto_sel = i;
-    }
-    cy += 54;
-
-    /* Thread Sayisi (Basit slider efekti) */
-    DrawTextC("Thread:", 24, cy, 11, COLOR_TEXT_SEC);
-    cy += 16;
-    Rectangle slider_rect = {24, cy, ctrl_w - 40, 16};
-    int hover_slider = CheckCollisionPointRec(GetMousePosition(), slider_rect);
-    if (hover_slider && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-      float pct = (GetMousePosition().x - 24) / (float)(ctrl_w - 40);
-      g_bf_threads = 1 + (int)(pct * 49); /* 1-50 thread */
-      if (g_bf_threads < 1)
-        g_bf_threads = 1;
-      if (g_bf_threads > 50)
-        g_bf_threads = 50;
-    }
-    float pct = (g_bf_threads - 1) / 49.0f;
-    DrawRectangleRounded((Rectangle){24, cy, ctrl_w - 40, 12}, 0.5f, 4,
-                         (Color){20, 28, 48, 255});
-    DrawRectangleRounded((Rectangle){24, cy, (ctrl_w - 40) * pct, 12}, 0.5f, 4,
-                         COLOR_ACCENT);
-    snprintf(buf, sizeof(buf), "%d thread", g_bf_threads);
-    DrawTextC(buf, 24 + ctrl_w / 2 - 20, cy + 1, 9, COLOR_TEXT);
-    cy += 32;
-
-    /* Baslat/Durdur Butonu */
-    Rectangle btn = {24, cy, ctrl_w - 40, 36};
-    if (!g_bf_state.is_running) {
-      if (GuiButton(btn, "Saldiriyi Baslat")) {
-        if (g_bf_target[0] != '\0') {
-          bf_start(g_bf_target, g_bf_port_override, (BfProtocol)g_bf_proto_sel,
-                   g_bf_threads);
-        } else {
-          /* Hedef secilmedi uyarisi */
-          DrawTextC("Once bir hedef IP secin!", 24, cy + 8, 11, COLOR_AMBER);
-        }
-      }
-    } else {
-      if (GuiButton(btn, "Saldiriyi Durdur"))
-        bf_stop();
-    }
-
-    /* --- Sag panel: Sonuclar --- */
-    int rx = 12 + ctrl_w + 8;
-    DrawRoundedPanel((Rectangle){rx, py, result_w, panel_h}, COLOR_PANEL,
-                     COLOR_BORDER);
-    DrawTextC("Sonuclar", rx + 12, py + 8, 13, COLOR_ACCENT);
-
-    if (g_bf_state.target_ip[0]) {
-      snprintf(buf, sizeof(buf), "%s:%d [%s]", g_bf_state.target_ip,
-               g_bf_state.port, bf_proto_name(g_bf_state.protocol));
-      int bw = MeasureText(buf, 10);
-      DrawTextC(buf, rx + result_w - bw - 12, py + 10, 10, COLOR_TEXT_DIM);
-    }
-
-    /* Baslik satiri */
-    int hdr_y = py + 30;
-    DrawRectangle(rx + 4, hdr_y + 16, result_w - 8, 1, COLOR_BORDER);
-    DrawTextC("#", rx + 12, hdr_y + 3, 10, COLOR_TEXT_SEC);
-    DrawTextC("Kullanici", rx + 36, hdr_y + 3, 10, COLOR_TEXT_SEC);
-    DrawTextC("Parola", rx + result_w / 2 - 40, hdr_y + 3, 10, COLOR_TEXT_SEC);
-    DrawTextC("Sure", rx + result_w - 80, hdr_y + 3, 10, COLOR_TEXT_SEC);
-
-    if (g_bf_state.result_count == 0) {
-      const char *msg = g_bf_state.is_complete  ? "Zayif kimlik bulunamadi."
-                        : g_bf_state.is_running ? "Tarama devam ediyor..."
-                                                : "Saldiri baslatilmadi.";
-      Color mc = g_bf_state.is_complete ? COLOR_GREEN : COLOR_TEXT_SEC;
-      int mw = MeasureText(msg, 12);
-      DrawTextC(msg, rx + result_w / 2 - mw / 2, py + panel_h / 2, 12, mc);
-    } else {
-      int item_h = 36;
-      int list_start = hdr_y + 20;
-      int list_h = panel_h - (list_start - py) - 8;
-
-      float max_s = g_bf_state.result_count * item_h - list_h;
-      if (max_s < 0)
-        max_s = 0;
-      Rectangle res_area = {rx, list_start, result_w, list_h};
-      if (CheckCollisionPointRec(GetMousePosition(), res_area)) {
-        g_scroll_bf_results -= GetMouseWheelMove() * 30;
-        if (g_scroll_bf_results < 0)
-          g_scroll_bf_results = 0;
-        if (g_scroll_bf_results > max_s)
-          g_scroll_bf_results = max_s;
-      }
-
-      BeginScissorModeScaled(rx, list_start, result_w, list_h);
-      for (int i = 0; i < g_bf_state.result_count; i++) {
-        int iy = list_start + i * item_h - (int)g_scroll_bf_results;
-        if (iy + item_h < list_start || iy > list_start + list_h)
-          continue;
-        BfCredResult *cr = &g_bf_state.results[i];
-
-        Color row_bg = (Color){50, 10, 10, 255};
-        DrawRectangle(rx + 4, iy, result_w - 8, item_h - 2, row_bg);
-        DrawRectangle(rx + 4, iy, 3, item_h - 2, COLOR_RED);
-
-        snprintf(buf, sizeof(buf), "%d", i + 1);
-        DrawTextC(buf, rx + 12, iy + 8, 11, COLOR_TEXT_SEC);
-        DrawTextC(cr->username, rx + 36, iy + 4, 12, COLOR_RED);
-        DrawTextC(cr->password, rx + result_w / 2 - 40, iy + 4, 12,
-                  COLOR_AMBER);
-
-        snprintf(buf, sizeof(buf), "%.0fms", cr->time_ms);
-        DrawTextC(buf, rx + result_w - 80, iy + 8, 10, COLOR_TEXT_DIM);
-
-        /* TEHLIKE badge */
-        DrawRectangleRounded((Rectangle){rx + 36, iy + 18, 50, 12}, 0.5f, 4,
-                             (Color){180, 30, 30, 180});
-        DrawTextC("KIRILDI!", rx + 39, iy + 19, 8, (Color){255, 200, 200, 255});
-      }
-      EndScissorMode();
     }
   }
 }

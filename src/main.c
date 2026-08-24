@@ -8,7 +8,6 @@
 #include "pcap_agent.h"
 #include "network_monitor.h"
 #include "port_scanner.h"
-#include "brute_force.h"
 #include "gui.h"
 #include <stdio.h>
 #include <string.h>
@@ -37,7 +36,6 @@ int main(int argc, char *argv[]) {
     scanner_init();
     full_monitor_init();
     portscan_init();
-    bf_init();
 
     /* PCAP Agent başlat */
     {
@@ -93,7 +91,6 @@ int main(int argc, char *argv[]) {
     pa_agent_stop_capture(&g_pcap_agent);
     pa_agent_destroy(&g_pcap_agent);
     arp_spoof_stop();
-    bf_cleanup();
     portscan_cleanup();
     full_monitor_cleanup();
     scanner_cleanup();

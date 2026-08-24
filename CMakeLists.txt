@@ -12,7 +12,6 @@ set(SOURCES
     src/arp_scanner.c
     src/network_monitor.c
     src/port_scanner.c
-    src/brute_force.c
     src/gui.c
     src/pcap_agent_network.c
     src/pcap_agent_train.c
