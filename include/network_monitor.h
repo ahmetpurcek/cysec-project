@@ -5,6 +5,7 @@
 #define NETWORK_MONITOR_H
 
 #include "platform.h"
+#include "arp_scanner.h"
 
 #define MAX_RAW_SIZE    256
 #define MAX_LAYERS      10
@@ -83,6 +84,12 @@ void arp_spoof_start(const char *target_ip, const char *gateway_ip, const char *
 void arp_spoof_stop(void);
 int  arp_spoof_is_running(void);
 const char *arp_spoof_get_target(void);
+
+/* Çoklu hedef (tüm ağ) ARP spoof — MITM ile tüm ağı dinle */
+void arp_spoof_start_all(const char *gateway_ip, const char *iface);
+void arp_spoof_sync_targets(const Device *devices, int count,
+                            const char *gateway_ip, const char *local_ip);
+int  arp_spoof_get_target_count(void);
 void enable_ip_forward(void);
 void disable_ip_forward(void);
 

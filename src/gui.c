@@ -3,8 +3,8 @@
  */
 #include "gui.h"
 #include "arp_scanner.h"
-#include "pcap_agent.h"
 #include "network_monitor.h"
+#include "network_ids.h"
 #include "platform.h"
 #include "port_scanner.h"
 #include "raylib.h"
@@ -25,12 +25,8 @@ static float g_scroll_alerts = 0;
 static char g_selected_device_ip[MAX_IP_LEN] = {0};
 static double g_last_refresh = 0;
 
-/* PCAP Agent GUI state */
-extern pa_agent_t g_pcap_agent;
-static pa_gui_alert_t g_pa_alerts[PA_MAX_GUI_ALERTS];
-static int g_pa_alert_count = 0;
 static PortScanResults g_portscan;
-static float g_scroll_pcap_flows = 0;
+static float g_scroll_nm_flows = 0;
 static float g_scroll_device_detail = 0;
 
 static int g_tools_subtab = 0;         /* 0=Paket Izleme, 1=Port Tarayici */
@@ -41,6 +37,10 @@ static int g_ps_selected_vuln_port = -1; /* secili port vulnerability detail */
 static float g_scroll_ps_devices = 0;    /* port scanner cihaz listesi scroll */
 static int g_selected_layer = -1;
 static char g_capture_active_ip[MAX_IP_LEN] = {0}; /* aktif trafik izleme yapilan cihaz */
+static int g_capture_all = 0; /* tum ag izleme (ARP spoof + full_monitor) aktif */
+static char g_capture_iface[MAX_IFACE_LEN] = {0}; /* izlemenin actigi arayuz (failover icin) */
+static IdsGuiAlert g_ids_alerts_snapshot[IDS_MAX_GUI_ALERTS];
+static int g_ids_alert_count = 0;
 static float g_scroll_nm_devices = 0;    /* network monitor cihaz listesi scroll */
 static char g_nm_target[MAX_IP_LEN] = {0}; /* network monitor secili hedef */
 static int g_nm_prev_packet_count = 0;  /* auto-scroll icin onceki paket sayisi */
@@ -133,7 +133,7 @@ static void draw_tabs(int W) {
   DrawRectangle(0, y, W, 32, COLOR_PANEL);
   DrawRectangle(0, y + 31, W, 1, COLOR_BORDER);
 
-  const char *labels[] = {"Dashboard", "Guvenlik", "Araclar"};
+  const char *labels[] = {"Dashboard", "Uyarilar", "Araclar"};
   int tx = 12;
   for (int i = 0; i < (int)TAB_COUNT; i++) {
     int tw = MeasureText(labels[i], 13) + 28;
@@ -152,7 +152,7 @@ static void draw_tabs(int W) {
     if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
       g_active_tab = i;
       /* Tab değişince aktif izlemeyi durdur */
-      if (g_capture_active_ip[0]) capture_stop_all();
+      if (g_capture_active_ip[0] || g_capture_all) capture_stop_all();
       if (i == TAB_DASHBOARD) {
         g_selected_device_ip[0] = '\0';
         g_scroll_devices = 0;
@@ -324,6 +324,23 @@ static void capture_stop_all(void) {
   full_monitor_stop();
   full_monitor_clear();
   g_capture_active_ip[0] = '\0';
+  g_capture_all = 0;
+  g_capture_iface[0] = '\0';
+}
+
+/* Tum ag izleme: full_monitor + gateway ARP spoof (tum cihazlar) */
+static void capture_start_all(void) {
+  capture_stop_all();
+  full_monitor_clear();
+  g_capture_all = 1;
+  /* Paket yakalama, trafigin ve ARP spoof'un actigi arayuzde olmali
+     (enp6s0); aksi halde otomatik secim wlan0'a takilir ve hic paket
+     gorunmez. */
+  strncpy(g_capture_iface, g_scan.local_iface, MAX_IFACE_LEN - 1);
+  full_monitor_start(g_scan.local_iface[0] ? g_scan.local_iface : NULL);
+  if (g_scan.gateway_ip[0] && g_scan.local_iface[0]) {
+    arp_spoof_start_all(g_scan.gateway_ip, g_scan.local_iface);
+  }
 }
 
 static void capture_start_for(const char *ip) {
@@ -336,8 +353,9 @@ static void capture_start_for(const char *ip) {
   /* Hedef IP'yi kaydet */
   strncpy(g_capture_active_ip, ip, MAX_IP_LEN - 1);
 
-  /* pcap'i başlat */
-  full_monitor_start(NULL);
+  /* pcap'i baslat — spoof/trafik arayuzuyle ayni NIC (default route) */
+  strncpy(g_capture_iface, g_scan.local_iface, MAX_IFACE_LEN - 1);
+  full_monitor_start(g_scan.local_iface[0] ? g_scan.local_iface : NULL);
 
   /* Yerel cihaz değilse ARP spoof başlat */
   int is_local = (strcmp(ip, g_scan.local_ip) == 0);
@@ -419,17 +437,17 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
   cy += 12;
 }
 
-/* ========== Guvenlik Paneli (PCAP Agent Alarmlari) ========== */
+/* ========== Uyarilar Paneli (IDS) ========== */
 static void draw_panel_security(int W, int H) {
   int y0 = 86;
   char buf[256];
 
-  /* Severity sayaclari */
+  /* Severity sayaclari (IDS snapshot uzerinden) */
   int cnt_kritik = 0, cnt_yuksek = 0, cnt_orta = 0, cnt_dusuk = 0;
-  for (int i = 0; i < g_pa_alert_count; i++) {
-    if (strcmp(g_pa_alerts[i].severity, "KRITIK") == 0) cnt_kritik++;
-    else if (strcmp(g_pa_alerts[i].severity, "YUKSEK") == 0) cnt_yuksek++;
-    else if (strcmp(g_pa_alerts[i].severity, "ORTA") == 0) cnt_orta++;
+  for (int i = 0; i < g_ids_alert_count; i++) {
+    if (strcmp(g_ids_alerts_snapshot[i].severity, "KRITIK") == 0) cnt_kritik++;
+    else if (strcmp(g_ids_alerts_snapshot[i].severity, "YUKSEK") == 0) cnt_yuksek++;
+    else if (strcmp(g_ids_alerts_snapshot[i].severity, "ORTA") == 0) cnt_orta++;
     else cnt_dusuk++;
   }
 
@@ -450,23 +468,35 @@ static void draw_panel_security(int W, int H) {
 
   int py = y0 + 58;
 
-  /* Agent durum paneli */
+  /* IDS durum paneli */
   DrawRoundedPanel((Rectangle){12, py, W - 24, 36}, COLOR_SURFACE, COLOR_BORDER);
-  snprintf(buf, sizeof(buf), "Imza: %d", g_pcap_agent.sig_count);
+  snprintf(buf, sizeof(buf), "Kural: %d", g_ids.rule_count);
   DrawTextC(buf, 24, py + 12, 10, COLOR_CYAN);
   snprintf(buf, sizeof(buf), "Paket: %lu",
-           (unsigned long)g_pcap_agent.total_pkts_processed);
+           (unsigned long)g_ids.total_pkts_processed);
   DrawTextC(buf, 120, py + 12, 10, COLOR_TEXT_SEC);
-  snprintf(buf, sizeof(buf), "Flow: %d", g_pcap_agent.flow_count);
+  snprintf(buf, sizeof(buf), "Akis: %d", g_ids.active_trackers);
   DrawTextC(buf, 260, py + 12, 10, COLOR_TEXT_SEC);
+  snprintf(buf, sizeof(buf), "Uyari: %lu", (unsigned long)g_ids.total_alerts);
+  DrawTextC(buf, 400, py + 12, 10, COLOR_TEXT_SEC);
 
-  /* Canli/Pasif durumu */
-  if (g_pcap_agent.running) {
-    DrawCircle(W - 80, py + 18, 4, COLOR_GREEN);
-    DrawTextC("Canli", W - 72, py + 12, 10, COLOR_GREEN);
+  /* Aktif izleme gostergesi */
+  int monitoring = (g_capture_all || g_capture_active_ip[0]);
+  if (g_ids.running && monitoring) {
+    DrawCircle(W - 250, py + 18, 4, COLOR_GREEN);
+    DrawTextC("Aktif Izleme", W - 242, py + 12, 10, COLOR_GREEN);
   } else {
-    DrawCircle(W - 80, py + 18, 4, COLOR_TEXT_DIM);
-    DrawTextC("Pasif", W - 72, py + 12, 10, COLOR_TEXT_DIM);
+    DrawCircle(W - 250, py + 18, 4, COLOR_TEXT_DIM);
+    DrawTextC("Pasif", W - 242, py + 12, 10, COLOR_TEXT_DIM);
+  }
+
+  /* Tum Agi Izle / Durdur butonu */
+  Rectangle mon_btn = {W - 190, py + 5, 100, 22};
+  if (GuiButton(mon_btn, monitoring ? "Durdur" : "Tum Agi Izle")) {
+    if (monitoring)
+      capture_stop_all();
+    else
+      capture_start_all();
   }
 
   py += 42;
@@ -474,41 +504,42 @@ static void draw_panel_security(int W, int H) {
   /* Alarm listesi paneli */
   DrawRoundedPanel((Rectangle){12, py, W - 24, H - py - 8},
                    COLOR_PANEL, COLOR_BORDER);
-  snprintf(buf, sizeof(buf), "Tehdit Alarmlari (%d)", g_pa_alert_count);
+  snprintf(buf, sizeof(buf), "Tehdit Alarmlari (%d)", g_ids_alert_count);
   DrawTextC(buf, 24, py + 8, 12, COLOR_ACCENT);
 
   /* Temizle butonu */
   Rectangle clr_btn = {W - 110, py + 5, 80, 20};
   if (GuiButton(clr_btn, "Temizle")) {
-    pa_agent_free_alerts(&g_pcap_agent);
-    g_pa_alert_count = 0;
+    ids_clear_alerts();
+    g_ids_alert_count =
+        ids_get_alerts_snapshot(g_ids_alerts_snapshot, IDS_MAX_GUI_ALERTS);
   }
 
-  if (g_pa_alert_count == 0) {
+  if (g_ids_alert_count == 0) {
     DrawTextC("Aktif tehdit alarmi yok.", W / 2 - 80, H / 2, 14, COLOR_GREEN);
-    if (g_pcap_agent.sig_count == 0)
-      DrawTextC("pcap_files/ dizinine pcap dosyasi ekleyin.",
-                W / 2 - 140, H / 2 + 22, 11, COLOR_TEXT_DIM);
+    if (!g_ids.running)
+      DrawTextC("IDS pasif. 'Tum Agi Izle' ile ag trafigini analiz edin.",
+                W / 2 - 200, H / 2 + 22, 11, COLOR_TEXT_DIM);
     return;
   }
 
-  int item_h = 52;
+  int item_h = 64;
   Rectangle area = {12, py + 30, W - 24, H - py - 42};
   if (CheckCollisionPointRec(GetMousePosition(), area)) {
     g_scroll_alerts -= GetMouseWheelMove() * 40;
     if (g_scroll_alerts < 0) g_scroll_alerts = 0;
-    float mx = (g_pa_alert_count * item_h) - area.height;
+    float mx = (g_ids_alert_count * item_h) - area.height;
     if (mx < 0) mx = 0;
     if (g_scroll_alerts > mx) g_scroll_alerts = mx;
   }
 
   BeginScissorModeScaled(area.x, area.y, area.width, area.height);
-  for (int i = g_pa_alert_count - 1; i >= 0; i--) {
-    int draw_idx = g_pa_alert_count - 1 - i;
+  for (int i = g_ids_alert_count - 1; i >= 0; i--) {
+    int draw_idx = g_ids_alert_count - 1 - i;
     int iy = area.y + draw_idx * item_h - (int)g_scroll_alerts;
     if (iy + item_h < area.y || iy > area.y + area.height) continue;
 
-    pa_gui_alert_t *al = &g_pa_alerts[i];
+    IdsGuiAlert *al = &g_ids_alerts_snapshot[i];
     Rectangle ir = {area.x + 4, iy, area.width - 8, item_h - 3};
 
     /* Arka plan rengi severity'ye gore */
@@ -538,12 +569,18 @@ static void draw_panel_security(int W, int H) {
     DrawTextC(buf, ir.x + 16 + slw + 4, ir.y + 5, 8, sc);
 
     /* Imza adi */
-    DrawTextC(al->sig_name, ir.x + 12, ir.y + 19, 11, COLOR_TEXT);
+    DrawTextC(al->sig_name, ir.x + 12, ir.y + 20, 11, COLOR_TEXT);
 
     /* Kaynak -> Hedef */
     snprintf(buf, sizeof(buf), "%s:%d -> %s:%d",
              al->src_ip, al->src_port, al->dst_ip, al->dst_port);
-    DrawTextC(buf, ir.x + 12, ir.y + 33, 9, COLOR_TEXT_SEC);
+    DrawTextC(buf, ir.x + 12, ir.y + 35, 9, COLOR_TEXT_SEC);
+
+    /* Aciklama (kisaltilmis) */
+    char dshort[100];
+    strncpy(dshort, al->description, 99);
+    dshort[99] = '\0';
+    DrawTextC(dshort, ir.x + 12, ir.y + 49, 8, COLOR_TEXT_DIM);
 
     /* Zaman */
     int tw = MeasureText(al->timestamp, 9);
@@ -553,7 +590,7 @@ static void draw_panel_security(int W, int H) {
   EndScissorMode();
 
   draw_custom_scrollbar(area.x + area.width - 10, area.y, 10, area.height,
-                        g_pa_alert_count * item_h, &g_scroll_alerts);
+                        g_ids_alert_count * item_h, &g_scroll_alerts);
 }
 
 /* ========== Araclar Paneli (Port Scan) ========== */
@@ -599,9 +636,10 @@ static void draw_panel_tools(int W, int H) {
                      COLOR_BORDER);
     DrawTextC("Paket Izleme", 24, py + 8, 13, COLOR_ACCENT);
 
-    int capture_for_this = (g_capture_active_ip[0] &&
-                            g_nm_target[0] &&
-                            strcmp(g_capture_active_ip, g_nm_target) == 0);
+    int capture_for_this =
+        (g_capture_all ||
+         (g_capture_active_ip[0] && g_nm_target[0] &&
+          strcmp(g_capture_active_ip, g_nm_target) == 0));
 
     int cy = py + 28;
 
@@ -648,13 +686,13 @@ static void draw_panel_tools(int W, int H) {
       if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         /* Yeni cihaz secildiginde eski izlemeyi durdur */
         if (g_nm_target[0] && strcmp(g_nm_target, g_scan.devices[i].ip) != 0) {
-          if (g_capture_active_ip[0]) capture_stop_all();
+          if (g_capture_active_ip[0] || g_capture_all) capture_stop_all();
         }
         strncpy(g_nm_target, g_scan.devices[i].ip, MAX_IP_LEN - 1);
         g_selected_packet_num = -1;
         g_nm_prev_packet_count = 0;
         g_nm_auto_scroll = 1;
-        g_scroll_pcap_flows = 0;
+        g_scroll_nm_flows = 0;
       }
     }
     EndScissorMode();
@@ -667,7 +705,16 @@ static void draw_panel_tools(int W, int H) {
     cy += 8;
 
     /* --- Trafik Yakala / Durdur kontrolleri --- */
-    if (g_nm_target[0] == '\0') {
+    if (g_capture_all) {
+      DrawCircle(30, cy + 8, 4, COLOR_GREEN);
+      DrawTextC("Tum Ag Izleniyor", 38, cy + 3, 10, COLOR_GREEN);
+      cy += 18;
+      if (GuiButton((Rectangle){24, cy, ctrl_w - 40, 26}, "Durdur")) {
+        capture_stop_all();
+        capture_for_this = 0;
+      }
+      cy += 30;
+    } else if (g_nm_target[0] == '\0') {
       DrawTextC("Bir hedef IP secin.", 24, cy + 4, 11, COLOR_TEXT_DIM);
       cy += 20;
     } else if (capture_for_this) {
@@ -697,15 +744,21 @@ static void draw_panel_tools(int W, int H) {
     static PacketRecord nm_dev_packets[1024];
     int nm_dpc = 0;
 
-    if (capture_for_this && g_nm_target[0]) {
+    if (capture_for_this && (g_capture_all || g_nm_target[0])) {
       int c = full_monitor_get_packets(nm_all_packets, 2048, 0);
-      for (int i = 0; i < c; i++) {
-        if (strcmp(nm_all_packets[i].src_ip, g_nm_target) == 0 ||
-            strcmp(nm_all_packets[i].dst_ip, g_nm_target) == 0 ||
-            strcmp(nm_all_packets[i].src_mac, g_nm_target) == 0 ||
-            strcmp(nm_all_packets[i].dst_mac, g_nm_target) == 0) {
-          if (nm_dpc < 1024)
-            nm_dev_packets[nm_dpc++] = nm_all_packets[i];
+      if (g_capture_all) {
+        /* Tum ag modu: IP filtresi yok */
+        for (int i = 0; i < c && nm_dpc < 1024; i++)
+          nm_dev_packets[nm_dpc++] = nm_all_packets[i];
+      } else {
+        for (int i = 0; i < c; i++) {
+          if (strcmp(nm_all_packets[i].src_ip, g_nm_target) == 0 ||
+              strcmp(nm_all_packets[i].dst_ip, g_nm_target) == 0 ||
+              strcmp(nm_all_packets[i].src_mac, g_nm_target) == 0 ||
+              strcmp(nm_all_packets[i].dst_mac, g_nm_target) == 0) {
+            if (nm_dpc < 1024)
+              nm_dev_packets[nm_dpc++] = nm_all_packets[i];
+          }
         }
       }
     }
@@ -723,7 +776,9 @@ static void draw_panel_tools(int W, int H) {
     DrawRoundedPanel((Rectangle){rx, py, result_w, panel_h}, COLOR_PANEL,
                      COLOR_BORDER);
 
-    if (g_nm_target[0]) {
+    if (g_capture_all) {
+      DrawTextC("Trafik: Tum Ag", rx + 12, py + 8, 13, COLOR_ACCENT);
+    } else if (g_nm_target[0]) {
       snprintf(buf, sizeof(buf), "Trafik: %s", g_nm_target);
       DrawTextC(buf, rx + 12, py + 8, 13, COLOR_ACCENT);
     } else {
@@ -772,27 +827,27 @@ static void draw_panel_tools(int W, int H) {
         Rectangle fa = {rx, tbl_y, result_w, lh};
         float wheel = GetMouseWheelMove();
         if (CheckCollisionPointRec(GetMousePosition(), fa) && wheel != 0.0f) {
-          g_scroll_pcap_flows -= wheel * 25;
-          if (g_scroll_pcap_flows < 0)
-            g_scroll_pcap_flows = 0;
-          if (g_scroll_pcap_flows > ms)
-            g_scroll_pcap_flows = ms;
+          g_scroll_nm_flows -= wheel * 25;
+          if (g_scroll_nm_flows < 0)
+            g_scroll_nm_flows = 0;
+          if (g_scroll_nm_flows > ms)
+            g_scroll_nm_flows = ms;
           /* Kullanici yukari scroll yaptiysa auto-scroll kapat */
-          g_nm_auto_scroll = (g_scroll_pcap_flows >= ms - scroll_threshold);
+          g_nm_auto_scroll = (g_scroll_nm_flows >= ms - scroll_threshold);
         }
 
         /* Yeni paket geldiyse ve auto-scroll aktifse en alta kaydir */
         if (nm_dpc > g_nm_prev_packet_count && g_nm_auto_scroll && ms > 0) {
-          g_scroll_pcap_flows = ms;
+          g_scroll_nm_flows = ms;
         }
         /* En altta olup olmadigini tekrar kontrol et */
-        if (g_scroll_pcap_flows >= ms - scroll_threshold) {
+        if (g_scroll_nm_flows >= ms - scroll_threshold) {
           g_nm_auto_scroll = 1;
         }
         g_nm_prev_packet_count = nm_dpc;
         BeginScissorModeScaled(rx, tbl_y, result_w, lh);
         for (int i = 0; i < nm_dpc; i++) {
-          int iy = tbl_y + i * 18 - (int)g_scroll_pcap_flows;
+          int iy = tbl_y + i * 18 - (int)g_scroll_nm_flows;
           if (iy + 18 < tbl_y || iy > tbl_y + lh)
             continue;
           PacketRecord *p = &nm_dev_packets[i];
@@ -845,7 +900,7 @@ static void draw_panel_tools(int W, int H) {
         }
         EndScissorMode();
         draw_custom_scrollbar(rx + result_w - 10, tbl_y, 10, lh, nm_dpc * 18,
-                              &g_scroll_pcap_flows);
+                              &g_scroll_nm_flows);
       }
     } else {
       /* --- Detayli PDU Gorunumu (Wireshark tarzi) --- */
@@ -1319,9 +1374,6 @@ void gui_init(int width, int height) {
   }
 
   /* İlk log yükle */
-  /* PCAP Agent alert snapshot */
-  g_pa_alert_count = pa_agent_get_alerts_snapshot(
-      &g_pcap_agent, g_pa_alerts, PA_MAX_GUI_ALERTS);
 }
 
 void gui_cleanup(void) {
@@ -1358,8 +1410,31 @@ void gui_draw(void) {
   if (now - g_last_refresh > 2.0) {
     scanner_get_results(&g_scan);
     scanner_get_log(&g_scanlog);
-    g_pa_alert_count = pa_agent_get_alerts_snapshot(
-        &g_pcap_agent, g_pa_alerts, PA_MAX_GUI_ALERTS);
+
+    /* Arayuz degisti (enp6s0 dustu -> wlan0 kaldi): aktif izleme eski
+       NIC'e takili kalmasin; yeni default-route arayuzunde yeniden
+       baslat (spoof dahil). Tarayici her taramada local_iface'i
+       canli gunceller. */
+    if ((g_capture_all || g_capture_active_ip[0]) && g_scan.local_iface[0] &&
+        g_capture_iface[0] && strcmp(g_capture_iface, g_scan.local_iface) != 0) {
+      fprintf(stderr, "[GUI] Arayuz degisti: %s -> %s, izleme yeniden baslatiliyor\n",
+              g_capture_iface, g_scan.local_iface);
+      int was_all = g_capture_all;
+      char saved_ip[MAX_IP_LEN];
+      strncpy(saved_ip, g_capture_active_ip, MAX_IP_LEN - 1);
+      capture_stop_all();
+      if (was_all) capture_start_all();
+      else if (saved_ip[0]) capture_start_for(saved_ip);
+    }
+
+    ids_set_mac_context(g_scan.local_mac, g_scan.gateway_mac,
+                        g_scan.gateway_ip);
+    g_ids_alert_count =
+        ids_get_alerts_snapshot(g_ids_alerts_snapshot, IDS_MAX_GUI_ALERTS);
+    if (g_capture_all) {
+      arp_spoof_sync_targets(g_scan.devices, g_scan.device_count,
+                             g_scan.gateway_ip, g_scan.local_ip);
+    }
     g_last_refresh = now;
   }
 
@@ -1400,3 +1475,4 @@ void gui_select_device(const char *ip) {
   strncpy(g_selected_device_ip, ip, MAX_IP_LEN - 1);
   g_scroll_device_detail = 0;
 }
+
