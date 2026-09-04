@@ -57,9 +57,11 @@ void ids_process_packet(const PacketRecord *pkt);
 int  ids_get_alerts_snapshot(IdsGuiAlert *out, int max_count);
 void ids_clear_alerts(void);
 
-/* MAC bağlamı: ARP zehirlenmesi tespiti için gateway/kendi MAC bilgisi */
+/* MAC/IP bağlamı: ARP zehirlenmesi tespiti ve self-origin uyari
+ * bastirmasi icin gateway/kendi MAC ve yerel IP bilgisi */
 void ids_set_mac_context(const char *local_mac, const char *gateway_mac,
-                         const char *gateway_ip);
+                         const char *gateway_ip, const char *local_ip);
 
 #endif /* NETWORK_IDS_H */
+
 

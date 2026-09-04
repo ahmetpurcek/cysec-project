@@ -68,6 +68,7 @@ static void dissect_ipv4(PacketRecord *pkt, const u_char *data, int len, int bas
 static void dissect_ipv6(PacketRecord *pkt, const u_char *data, int len, int base_off);
 static void dissect_arp(PacketRecord *pkt, const u_char *data, int len, int base_off);
 static void dissect_icmp(PacketRecord *pkt, const u_char *data, int len, int base_off);
+static void dissect_icmpv6(PacketRecord *pkt, const u_char *data, int len, int base_off);
 static void dissect_tcp(PacketRecord *pkt, const u_char *data, int len, int base_off, int ip_payload_len);
 static void dissect_udp(PacketRecord *pkt, const u_char *data, int len, int base_off);
 static void dissect_dns(PacketRecord *pkt, const u_char *data, int len, int base_off);
@@ -245,21 +246,89 @@ static void dissect_ipv4(PacketRecord *pkt, const u_char *data, int len, int bas
 /* ---------- IPv6 ---------- */
 static void dissect_ipv6(PacketRecord *pkt, const u_char *data, int len, int base_off) {
     if (len < 40) return;
-    // next header
-    int next_hdr = data[6];
-    // IP'leri yaz
-    snprintf(pkt->src_ip, sizeof(pkt->src_ip),
-             "%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x",
-             data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
-             data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23]);
-    snprintf(pkt->dst_ip, sizeof(pkt->dst_ip),
-             "%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x",
-             data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
-             data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39]);
 
-    strncpy(pkt->protocol, "IPv6", sizeof(pkt->protocol) - 1);
-    snprintf(pkt->info, sizeof(pkt->info), "%s → %s Next: %d",
-             pkt->src_ip, pkt->dst_ip, next_hdr);
+    unsigned int vtc = ((unsigned int)data[0] << 24) | (data[1] << 16) |
+                        (data[2] << 8) | data[3];
+    int payload_len = (data[4] << 8) | data[5];
+    int next_hdr = data[6];
+    int hop_limit = data[7];
+
+    /* Jumbogram (payload_len==0) veya truncate durumunda eldeki veriyle sinirla */
+    if (payload_len <= 0 || payload_len > len - 40) payload_len = len - 40;
+
+    struct in6_addr sa, da;
+    memset(&sa, 0, sizeof(sa));
+    memset(&da, 0, sizeof(da));
+    memcpy(sa.s6_addr, data + 8, 16);
+    memcpy(da.s6_addr, data + 24, 16);
+    char src6[INET6_ADDRSTRLEN], dst6[INET6_ADDRSTRLEN];
+    if (!inet_ntop(AF_INET6, &sa, src6, sizeof(src6))) strncpy(src6, "?", sizeof(src6) - 1);
+    if (!inet_ntop(AF_INET6, &da, dst6, sizeof(dst6))) strncpy(dst6, "?", sizeof(dst6) - 1);
+    strncpy(pkt->src_ip, src6, sizeof(pkt->src_ip) - 1);
+    strncpy(pkt->dst_ip, dst6, sizeof(pkt->dst_ip) - 1);
+    pkt->ttl = hop_limit;
+
+    char sum[160];
+    snprintf(sum, sizeof(sum), "Src: %s → Dst: %s HopLimit=%d", src6, dst6, hop_limit);
+    add_layer(pkt, LAYER_IPV6, "Internet Protocol Version 6", sum, base_off, 40,
+              "Version: %d\nTraffic Class: 0x%02x\nFlow Label: 0x%05x\nPayload Length: %d\n"
+              "Next Header: %d (%s)\nHop Limit: %d\nSource: %s\nDestination: %s",
+              (vtc >> 28) & 0xF, (vtc >> 20) & 0xFF, vtc & 0xFFFFF,
+              payload_len, next_hdr, ip_proto_name(next_hdr), hop_limit, src6, dst6);
+
+    int off = 40;
+    int remaining = payload_len;
+
+    /* Extension header zinciri: 0 (Hop-by-Hop), 43 (Routing), 60 (Dest Opt),
+       44 (Fragment), 51 (AH). Fragmanin ilk parcasi degilse ust katman cozulemez. */
+    while (remaining > 0) {
+        if (next_hdr == 6 || next_hdr == 17 || next_hdr == 58) break; /* TCP/UDP/ICMPv6 */
+        if (next_hdr == 44) { /* Fragment */
+            if (remaining < 8) return;
+            int frag_word = (data[off + 2] << 8) | data[off + 3];
+            int frag_off = (frag_word >> 3) & 0x1FFF;
+            next_hdr = data[off];
+            off += 8;
+            remaining -= 8;
+            if (frag_off != 0) {
+                strncpy(pkt->protocol, "IPv6", sizeof(pkt->protocol) - 1);
+                snprintf(pkt->info, sizeof(pkt->info), "%s → %s IPv6 fragment (offset %d)",
+                         src6, dst6, frag_off * 8);
+                return;
+            }
+            continue;
+        }
+        if (next_hdr == 0 || next_hdr == 43 || next_hdr == 60) { /* HBH/Routing/DestOpt */
+            if (remaining < 2) return;
+            int eh_len = (data[off + 1] + 1) * 8;
+            if (eh_len > remaining) return;
+            next_hdr = data[off];
+            off += eh_len;
+            remaining -= eh_len;
+            continue;
+        }
+        if (next_hdr == 51) { /* AH */
+            if (remaining < 2) return;
+            int ah_len = (data[off + 1] + 2) * 4;
+            if (ah_len > remaining) return;
+            next_hdr = data[off];
+            off += ah_len;
+            remaining -= ah_len;
+            continue;
+        }
+        break; /* Bilinmeyen next header */
+    }
+
+    switch (next_hdr) {
+        case 6:  dissect_tcp(pkt, data + off, remaining, base_off + off, remaining); break;
+        case 17: dissect_udp(pkt, data + off, remaining, base_off + off); break;
+        case 58: dissect_icmpv6(pkt, data + off, remaining, base_off + off); break;
+        default:
+            strncpy(pkt->protocol, "IPv6", sizeof(pkt->protocol) - 1);
+            snprintf(pkt->info, sizeof(pkt->info), "%s → %s Next: %d (%s)",
+                     src6, dst6, next_hdr, ip_proto_name(next_hdr));
+            break;
+    }
 }
 
 /* ---------- ARP ---------- */
@@ -313,6 +382,36 @@ static void dissect_icmp(PacketRecord *pkt, const u_char *data, int len, int bas
     strncpy(pkt->protocol, "ICMP", sizeof(pkt->protocol) - 1);
     snprintf(pkt->info, sizeof(pkt->info), "%s (type=%d code=%d)", type_str, type, code);
     add_layer(pkt, LAYER_ICMP, "Internet Control Message Protocol", pkt->info, base_off, len,
+              "Type: %d (%s)\nCode: %d\nChecksum: 0x%04x",
+              type, type_str, code, (data[2] << 8) | data[3]);
+
+    __sync_fetch_and_add(&stats.icmp, 1);
+}
+
+/* ---------- ICMPv6 ---------- */
+static void dissect_icmpv6(PacketRecord *pkt, const u_char *data, int len, int base_off) {
+    if (len < 4) return;
+    int type = data[0];
+    int code = data[1];
+
+    const char *type_str;
+    switch (type) {
+        case 1:   type_str = "Destination Unreachable"; break;
+        case 2:   type_str = "Packet Too Big"; break;
+        case 3:   type_str = "Time Exceeded"; break;
+        case 4:   type_str = "Parameter Problem"; break;
+        case 128: type_str = "Echo Request"; break;
+        case 129: type_str = "Echo Reply"; break;
+        case 133: type_str = "Router Solicitation"; break;
+        case 134: type_str = "Router Advertisement"; break;
+        case 135: type_str = "Neighbor Solicitation"; break;
+        case 136: type_str = "Neighbor Advertisement"; break;
+        default:  type_str = "Other"; break;
+    }
+
+    strncpy(pkt->protocol, "ICMPv6", sizeof(pkt->protocol) - 1);
+    snprintf(pkt->info, sizeof(pkt->info), "%s (type=%d code=%d)", type_str, type, code);
+    add_layer(pkt, LAYER_ICMP, "Internet Control Message Protocol v6", pkt->info, base_off, len,
               "Type: %d (%s)\nCode: %d\nChecksum: 0x%04x",
               type, type_str, code, (data[2] << 8) | data[3]);
 
@@ -1004,7 +1103,10 @@ const char *ip_proto_name(int proto) {
         case 1: return "ICMP"; case 2: return "IGMP"; case 6: return "TCP";
         case 17: return "UDP"; case 41: return "IPv6"; case 47: return "GRE";
         case 50: return "ESP"; case 51: return "AH"; case 89: return "OSPF";
-        case 132: return "SCTP"; default: return "Unknown";
+        case 132: return "SCTP"; case 0: return "HOPOPT";
+        case 43: return "IPv6-Route"; case 44: return "IPv6-Frag";
+        case 58: return "ICMPv6"; case 59: return "NoNext"; case 60: return "IPv6-Opts";
+        default: return "Unknown";
     }
 }
 
@@ -1139,6 +1241,30 @@ static void hex_to_ip(const char *hex, char *ip, int ip_len) {
     snprintf(ip, ip_len, "%d.%d.%d.%d", b[0], b[1], b[2], b[3]);
 }
 
+/* /proc/net/tcp6 ve /proc/net/udp6: adresler 4 adet little-endian u32 olarak
+ * %08X biciminde yazilir (ornek ::1 -> son kelime 01000000). Her kelimeyi
+ * byte dizisine cevirip inet_ntop ile metne donusturuyoruz. */
+static int hex_to_ip6(const char *hex, char *ip, int ip_len) {
+    unsigned int w[4];
+    if (sscanf(hex, "%8x%8x%8x%8x", &w[0], &w[1], &w[2], &w[3]) != 4) return -1;
+    struct in6_addr a;
+    memset(&a, 0, sizeof(a));
+    for (int i = 0; i < 4; i++) {
+        a.s6_addr[i * 4 + 0] = (unsigned char)(w[i] & 0xFF);
+        a.s6_addr[i * 4 + 1] = (unsigned char)((w[i] >> 8) & 0xFF);
+        a.s6_addr[i * 4 + 2] = (unsigned char)((w[i] >> 16) & 0xFF);
+        a.s6_addr[i * 4 + 3] = (unsigned char)((w[i] >> 24) & 0xFF);
+    }
+    return inet_ntop(AF_INET6, &a, ip, ip_len) ? 0 : -1;
+}
+
+/* 32 hex hanelik (128 bit) adres alani tamamen sifir mi? */
+static int all_zero_hex(const char *hex) {
+    for (int i = 0; hex[i]; i++)
+        if (hex[i] != '0') return 0;
+    return 1;
+}
+
 /* TCP state names */
 static const char *tcp_state_name(int state) {
     switch (state) {
@@ -1160,34 +1286,37 @@ static const char *tcp_state_name(int state) {
 /* Parse one line from /proc/net/tcp or /proc/net/udp and create a PacketRecord */
 static int parse_proc_net_line(const char *line, const char *proto, PacketRecord *pkt) {
     unsigned int sl;
-    char local_hex_addr[16], remote_hex_addr[16];
+    char local_hex_addr[40], remote_hex_addr[40];
     unsigned int local_port, remote_port;
     unsigned int state;
     unsigned int tx_queue, rx_queue;
     unsigned int timer, tm_when;
     unsigned int uid;
 
-    int parsed = sscanf(line, " %u: %8[0-9A-Fa-f]:%X %8[0-9A-Fa-f]:%X %X %X:%X %X:%X %*X %u",
+    int parsed = sscanf(line, " %u: %32[0-9A-Fa-f]:%X %32[0-9A-Fa-f]:%X %X %X:%X %X:%X %*X %u",
                         &sl, local_hex_addr, &local_port,
                         remote_hex_addr, &remote_port,
                         &state, &tx_queue, &rx_queue,
                         &timer, &tm_when, &uid);
     if (parsed < 11) return 0;
 
-    /* Skip entries with no remote address (0.0.0.0:0 for LISTEN) for UDP,
-       but keep LISTEN state for TCP */
-    unsigned int remote_addr_val;
-    sscanf(remote_hex_addr, "%x", &remote_addr_val);
+    /* tcp6/udp6 satirlarinda adresler 32 hex hanedir; v4 ise 8 hane */
+    int is_v6 = (strlen(local_hex_addr) == 32);
     int is_tcp = (strcmp(proto, "TCP") == 0);
 
-    /* Skip pure listeners for UDP (they're not interesting as "traffic") */
-    if (!is_tcp && remote_addr_val == 0 && remote_port == 0) return 0;
+    /* UDP saf dinleyiciler (uzak 0.0.0.0:0 / ::0:0) trafik sayilmaz */
+    if (!is_tcp && all_zero_hex(remote_hex_addr) && remote_port == 0) return 0;
 
     memset(pkt, 0, sizeof(PacketRecord));
     pkt->timestamp = (double)time(NULL);
     
-    hex_to_ip(local_hex_addr, pkt->src_ip, sizeof(pkt->src_ip));
-    hex_to_ip(remote_hex_addr, pkt->dst_ip, sizeof(pkt->dst_ip));
+    if (is_v6) {
+        hex_to_ip6(local_hex_addr, pkt->src_ip, sizeof(pkt->src_ip));
+        hex_to_ip6(remote_hex_addr, pkt->dst_ip, sizeof(pkt->dst_ip));
+    } else {
+        hex_to_ip(local_hex_addr, pkt->src_ip, sizeof(pkt->src_ip));
+        hex_to_ip(remote_hex_addr, pkt->dst_ip, sizeof(pkt->dst_ip));
+    }
     snprintf(pkt->src_port, sizeof(pkt->src_port), "%d", local_port);
     snprintf(pkt->dst_port, sizeof(pkt->dst_port), "%d", remote_port);
     strncpy(pkt->protocol, proto, sizeof(pkt->protocol) - 1);
@@ -1251,7 +1380,7 @@ static int parse_proc_net_line(const char *line, const char *proto, PacketRecord
 
     /* /proc/net modunda IDS icin sentetik ham cerceve uret
        (SYN_SENT: biz -> uzak, SYN_RECV: uzak -> biz saldirgan) */
-    if (is_tcp && (state == 2 || state == 3)) {
+    if (is_tcp && !is_v6 && (state == 2 || state == 3)) {
         unsigned char *r = pkt->raw_data;
         memset(r, 0, MAX_RAW_SIZE);
         r[12] = 0x08; r[13] = 0x00;              /* EtherType IPv4 */
@@ -1349,6 +1478,8 @@ static void *procnet_fallback_thread(void *arg) {
 
         poll_proc_net_file("/proc/net/tcp", "TCP");
         poll_proc_net_file("/proc/net/udp", "UDP");
+        poll_proc_net_file("/proc/net/tcp6", "TCP");
+        poll_proc_net_file("/proc/net/udp6", "UDP");
 
         platform_sleep_ms(2000); /* Poll every 2 seconds */
     }

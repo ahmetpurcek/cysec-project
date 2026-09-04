@@ -14,6 +14,7 @@ set(SOURCES
     src/network_ids.c
     src/port_scanner.c
     src/gui.c
+    src/filter_engine.c
 )
 
 # Header dizinleri
@@ -80,5 +81,6 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/mac-addresses.txt")
 endif()
 message(STATUS "Platform: ${CMAKE_SYSTEM_NAME}")
 message(STATUS "Derleyici: ${CMAKE_C_COMPILER}")
+
 
 

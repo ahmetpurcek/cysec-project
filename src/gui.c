@@ -3,6 +3,7 @@
  */
 #include "gui.h"
 #include "arp_scanner.h"
+#include "filter_engine.h"
 #include "network_monitor.h"
 #include "network_ids.h"
 #include "platform.h"
@@ -45,6 +46,9 @@ static float g_scroll_nm_devices = 0;    /* network monitor cihaz listesi scroll
 static char g_nm_target[MAX_IP_LEN] = {0}; /* network monitor secili hedef */
 static int g_nm_prev_packet_count = 0;  /* auto-scroll icin onceki paket sayisi */
 static int g_nm_auto_scroll = 1;        /* 1=en altta, otomatik kaydir */
+static char g_pkt_filter[256];         /* display filtre ifadesi (Paket Izleme) */
+static char g_pkt_filter_prev[256];    /* onceki ifade: degisiklik algilamak icin */
+static int g_pkt_filter_active = 0;    /* filtre kutusu odakli mi (metin girisi) */
 
 
 static Font g_custom_font = {0};
@@ -746,16 +750,20 @@ static void draw_panel_tools(int W, int H) {
 
     if (capture_for_this && (g_capture_all || g_nm_target[0])) {
       int c = full_monitor_get_packets(nm_all_packets, 2048, 0);
+      /* Display filtre ifadesi de uygulanir (Wireshark tarzi) */
       if (g_capture_all) {
         /* Tum ag modu: IP filtresi yok */
-        for (int i = 0; i < c && nm_dpc < 1024; i++)
-          nm_dev_packets[nm_dpc++] = nm_all_packets[i];
+        for (int i = 0; i < c && nm_dpc < 1024; i++) {
+          if (filter_engine_packet_matches(&nm_all_packets[i], g_pkt_filter))
+            nm_dev_packets[nm_dpc++] = nm_all_packets[i];
+        }
       } else {
         for (int i = 0; i < c; i++) {
-          if (strcmp(nm_all_packets[i].src_ip, g_nm_target) == 0 ||
-              strcmp(nm_all_packets[i].dst_ip, g_nm_target) == 0 ||
-              strcmp(nm_all_packets[i].src_mac, g_nm_target) == 0 ||
-              strcmp(nm_all_packets[i].dst_mac, g_nm_target) == 0) {
+          if ((strcmp(nm_all_packets[i].src_ip, g_nm_target) == 0 ||
+               strcmp(nm_all_packets[i].dst_ip, g_nm_target) == 0 ||
+               strcmp(nm_all_packets[i].src_mac, g_nm_target) == 0 ||
+               strcmp(nm_all_packets[i].dst_mac, g_nm_target) == 0) &&
+              filter_engine_packet_matches(&nm_all_packets[i], g_pkt_filter)) {
             if (nm_dpc < 1024)
               nm_dev_packets[nm_dpc++] = nm_all_packets[i];
           }
@@ -799,6 +807,57 @@ static void draw_panel_tools(int W, int H) {
     if (g_selected_packet_num == -1) {
       /* --- Paket Listesi Gorunumu --- */
       int tbl_y = hdr_y + 4;
+
+      /* --- Wireshark-tarzi display filtre cubugu --- */
+      int fv = (g_pkt_filter[0] == '\0') ||
+               filter_engine_expr_valid(g_pkt_filter);
+      int fb_y = tbl_y + 3;
+      Rectangle fbb = {rx + 54, fb_y, result_w - 54 - 86, 24};
+      DrawTextC("Filtre:", rx + 10, fb_y + 7, 11, COLOR_TEXT_SEC);
+
+      /* Odak yonetimi: kutuya tiklayinca yazi girisi baslar, disari
+         tiklayinca veya Enter/Tab ile biter */
+      if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (CheckCollisionPointRec(GetMousePosition(), fbb))
+          g_pkt_filter_active = 1;
+        else
+          g_pkt_filter_active = 0;
+      }
+      GuiTextBox(fbb, g_pkt_filter, (int)sizeof(g_pkt_filter),
+                 g_pkt_filter_active != 0);
+      if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_TAB))
+        g_pkt_filter_active = 0;
+
+      /* Ifade degisti: kaydirma ve auto-scroll durumunu sifirla */
+      if (strcmp(g_pkt_filter, g_pkt_filter_prev) != 0) {
+        strncpy(g_pkt_filter_prev, g_pkt_filter,
+                sizeof(g_pkt_filter_prev) - 1);
+        g_pkt_filter_prev[sizeof(g_pkt_filter_prev) - 1] = '\0';
+        g_scroll_nm_flows = 0;
+        g_nm_auto_scroll = 1;
+        g_nm_prev_packet_count = 0;
+      }
+
+      /* Gecersiz ifade: kirmizi cerceve + panel usti uyari yazisi */
+      if (!fv) {
+        DrawRectangleLinesEx(fbb, 1, COLOR_RED);
+        DrawTextC("Gecersiz ifade", rx + result_w - 170, py + 10, 9,
+                  COLOR_RED);
+      }
+
+      /* Temizle: filtreyi kaldir ve listeyi sifirla */
+      if (GuiButton((Rectangle){rx + result_w - 78, fb_y, 70, 24}, "Temizle")) {
+        g_pkt_filter[0] = '\0';
+        g_pkt_filter_prev[0] = '\0';
+        g_pkt_filter_active = 0;
+        g_scroll_nm_flows = 0;
+        g_nm_auto_scroll = 1;
+        g_nm_prev_packet_count = 0;
+        g_selected_packet_num = -1;
+        g_scroll_pdu_detail = 0;
+      }
+
+      tbl_y += 32; /* filtre cubugunun altindan tablo baslar */
       DrawRectangle(rx + 4, tbl_y, result_w - 8, 16, COLOR_SURFACE);
       DrawTextC("No", rx + 10, tbl_y + 3, 9, COLOR_TEXT_SEC);
       DrawTextC("Zaman", rx + 40, tbl_y + 3, 9, COLOR_TEXT_SEC);
@@ -809,8 +868,13 @@ static void draw_panel_tools(int W, int H) {
       tbl_y += 18;
 
       if (nm_dpc == 0) {
-        const char *msg = capture_for_this ? "Henuz paket yakalanmadi."
-                                           : "Izleme baslatilmadi.";
+        const char *msg;
+        if (!capture_for_this)
+          msg = "Izleme baslatilmadi.";
+        else if (g_pkt_filter[0])
+          msg = "Filtreye uyan paket yok.";
+        else
+          msg = "Henuz paket yakalanmadi.";
         int mw = MeasureText(msg, 12);
         DrawTextC(msg, rx + result_w / 2 - mw / 2, py + panel_h / 2, 12,
                   COLOR_TEXT_SEC);
@@ -1366,6 +1430,18 @@ void gui_init(int width, int height) {
   GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL, ColorToInt(COLOR_ACCENT));
   GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, ColorToInt(COLOR_BORDER));
 
+  /* Filtre kutusu (GuiTextBox) koyu temaya uysun */
+  GuiSetStyle(TEXTBOX, BASE_COLOR_NORMAL, ColorToInt(COLOR_SURFACE2));
+  GuiSetStyle(TEXTBOX, BASE_COLOR_FOCUSED,
+              ColorToInt((Color){34, 42, 68, 255}));
+  GuiSetStyle(TEXTBOX, BASE_COLOR_PRESSED,
+              ColorToInt((Color){34, 42, 68, 255}));
+  GuiSetStyle(TEXTBOX, TEXT_COLOR_NORMAL, ColorToInt(COLOR_TEXT));
+  GuiSetStyle(TEXTBOX, TEXT_COLOR_FOCUSED, ColorToInt(COLOR_ACCENT));
+  GuiSetStyle(TEXTBOX, BORDER_COLOR_NORMAL, ColorToInt(COLOR_BORDER));
+  GuiSetStyle(TEXTBOX, BORDER_COLOR_FOCUSED, ColorToInt(COLOR_ACCENT));
+  GuiSetStyle(TEXTBOX, BORDER_WIDTH, 1);
+
   /* TTF Font yükle ve yapılandır */
   g_custom_font = LoadFontEx("../assets/fonts/Roboto-Regular.ttf", 64, 0, 250);
   if (g_custom_font.texture.id > 0) {
@@ -1428,7 +1504,7 @@ void gui_draw(void) {
     }
 
     ids_set_mac_context(g_scan.local_mac, g_scan.gateway_mac,
-                        g_scan.gateway_ip);
+                        g_scan.gateway_ip, g_scan.local_ip);
     g_ids_alert_count =
         ids_get_alerts_snapshot(g_ids_alerts_snapshot, IDS_MAX_GUI_ALERTS);
     if (g_capture_all) {
@@ -1475,4 +1551,8 @@ void gui_select_device(const char *ip) {
   strncpy(g_selected_device_ip, ip, MAX_IP_LEN - 1);
   g_scroll_device_detail = 0;
 }
+
+
+
+
 

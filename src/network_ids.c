@@ -115,11 +115,38 @@ IdsAgent g_ids;
 static platform_mutex_t g_ids_lock;
 static int g_ids_initialized = 0;
 
-/* MAC bağlamı (ARP zehirlenmesi için) */
+/* MAC/IP bağlamı (ARP zehirlenmesi + self-origin bastırma için) */
 static uint8_t g_local_mac[6];
 static uint8_t g_gateway_mac[6];
 static int     g_gateway_mac_valid = 0;
 static uint32_t g_gateway_ip = 0;
+static uint32_t g_local_ip = 0;
+
+/* ==================================================================
+ *   SELF-ORIGINATION SUPPRESSION
+ *   Uygulamanin kendi urettigi trafik (otomatik ARP/ping taramasi,
+ *   fallback sentetik cerceveler) uyari gurultusu yaratmasin. Yabanci
+ *   MAC'ten gelen (kaynak IP yerel olsa bile) cerceveler bastirilmaz:
+ *   spoof'lu IP saldirgan olabilir.
+ * ================================================================== */
+
+static int ids_mac_zero(const uint8_t mac[6]) {
+    for (int i = 0; i < 6; i++)
+        if (mac[i] != 0) return 0;
+    return 1;
+}
+
+static int ids_is_self_originated(const IdsPktInfo *pi) {
+    if (!ids_mac_zero(pi->src_mac)) {
+        /* pcap modu: gercek cerceve — kendi NIC MAC'imiz mi? */
+        if (memcmp(pi->src_mac, g_local_mac, 6) == 0) return 1;
+        /* Yabanci MAC: bastirma yok (ARP poisoning/spoof tespiti korunur) */
+        return 0;
+    }
+    /* Fallback modu: sentetik cerceve (MAC yok) — IP eslesmesine bak */
+    if (g_local_ip && pi->src_ip == g_local_ip) return 1;
+    return 0;
+}
 
 /* Alert ring buffer (kronolojik, en yeni sonda) */
 static IdsGuiAlert g_alert_buf[IDS_MAX_ALERTS];
@@ -484,6 +511,7 @@ void ids_init(void) {
     memset(g_gateway_mac, 0, sizeof(g_gateway_mac));
     g_gateway_mac_valid = 0;
     g_gateway_ip = 0;
+    g_local_ip = 0;
     g_ids.running = 1;
     g_ids.rule_count = 14;
     g_ids_initialized = 1;
@@ -502,6 +530,12 @@ void ids_process_packet(const PacketRecord *pkt) {
     IdsPktInfo pi;
     ids_parse_pkt(pkt, &pi);
     if (!pi.is_ipv4 && !pi.is_arp) return;
+
+    /* Kendi urettigimiz trafik uyari uretmesin: otomatik ARP/ping
+     * taramasi (pcap kendi cercevelerini de gorur) ve fallback modun
+     * sentetik cerceveleri Broadcast Storm / Ping Sweep / SYN tarama
+     * kurallarini tetikleyip Uyarilar sekmesini dolduruyordu. */
+    if (ids_is_self_originated(&pi)) return;
 
     g_ids.total_pkts_processed++;
     ids_check_rules(&pi);
@@ -525,7 +559,7 @@ void ids_clear_alerts(void) {
 }
 
 void ids_set_mac_context(const char *local_mac, const char *gateway_mac,
-                         const char *gateway_ip) {
+                         const char *gateway_ip, const char *local_ip) {
     unsigned int b[6];
     if (gateway_mac && sscanf(gateway_mac, "%x:%x:%x:%x:%x:%x",
                               &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
@@ -540,6 +574,11 @@ void ids_set_mac_context(const char *local_mac, const char *gateway_mac,
         unsigned int a, c, d, e;
         if (sscanf(gateway_ip, "%u.%u.%u.%u", &a, &c, &d, &e) == 4)
             g_gateway_ip = (a << 24) | (c << 16) | (d << 8) | e;
+    }
+    if (local_ip) {
+        unsigned int a, c, d, e;
+        if (sscanf(local_ip, "%u.%u.%u.%u", &a, &c, &d, &e) == 4)
+            g_local_ip = (a << 24) | (c << 16) | (d << 8) | e;
     }
 }
 
