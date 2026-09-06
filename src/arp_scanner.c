@@ -184,14 +184,6 @@ static int _scan_with_arp_table(Device *devices, int max_devices, const char *ne
                 dev->discovered_at = time(NULL);
                 dev->last_seen = time(NULL);
                 
-                /* Rastgele MAC kontrolü */
-                if (strlen(dev->mac) >= 2) {
-                    char c = dev->mac[1];
-                    if (c == '2' || c == '6' || c == 'A' || c == 'E' ||
-                        c == 'a' || c == 'e') {
-                        dev->is_random_mac = 1;
-                    }
-                }
                 count++;
             }
         }
@@ -535,4 +527,5 @@ void scanner_cleanup(void) {
     platform_mutex_destroy(&g_log_lock);
     g_initialized = 0;
 }
+
 

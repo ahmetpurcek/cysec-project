@@ -279,30 +279,19 @@ static void draw_tabs(int W) {
   DrawRectangle(0, y + 31, W, 1, ui_alpha(COLOR_BORDER, 120));
 
   const char *labels[] = {"Kontrol Paneli", "Alarm Merkezi", "Araclar"};
-  const char *hints[] = {"AG", "IDS", "TRL"};
   int tx = 12;
   for (int i = 0; i < (int)TAB_COUNT; i++) {
-    int tw = MeasureText(labels[i], 13) + 40;
+    int tw = MeasureText(labels[i], 13) + 30;
     Rectangle btn = {(float)tx, (float)y + 3, (float)tw, 26};
     int hover = CheckCollisionPointRec(GetMousePosition(), btn);
     if (i == (int)g_active_tab) {
       DrawRectangleRounded(btn, 0.45f, 6, COLOR_SELECTED);
       DrawRectangle(tx, y + 25, tw, 2, COLOR_ACCENT);
-      /* ikon kutusu */
-      DrawRectangleRounded(
-          (Rectangle){btn.x + 6, btn.y + 5, 16, 16}, 0.3f, 4,
-          ui_alpha(COLOR_ACCENT, 60));
-      DrawTextC(hints[i], btn.x + 9, btn.y + 7, 8, COLOR_ACCENT);
-      DrawTextC(labels[i], tx + 30, y + 9, 13, COLOR_TEXT);
+      DrawTextC(labels[i], tx + 14, y + 9, 13, COLOR_TEXT);
     } else {
       if (hover)
         DrawRectangleRounded(btn, 0.45f, 6, (Color){255, 255, 255, 8});
-      DrawRectangleRounded(
-          (Rectangle){btn.x + 6, btn.y + 5, 16, 16}, 0.3f, 4,
-          (Color){255, 255, 255, 12});
-      DrawTextC(hints[i], btn.x + 9, btn.y + 7, 8,
-                hover ? COLOR_TEXT_SEC : COLOR_TEXT_DIM);
-      DrawTextC(labels[i], tx + 30, y + 9, 13,
+      DrawTextC(labels[i], tx + 14, y + 9, 13,
                 hover ? COLOR_TEXT_SEC : COLOR_TEXT_DIM);
     }
     if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
@@ -336,12 +325,12 @@ static void draw_stat_card(Rectangle r, const char *label, const char *value,
     char s[96];
     strncpy(s, sub, sizeof(s) - 1);
     s[sizeof(s) - 1] = '\0';
-    int sw = MeasureText(s, 9);
+    int sw = MeasureText(s, 10);
     while (sw > r.width - 22 && strlen(s) > 1) {
       s[strlen(s) - 1] = '\0';
-      sw = MeasureText(s, 9);
+      sw = MeasureText(s, 10);
     }
-    DrawTextC(s, r.x + 13, r.y + 48, 9, COLOR_TEXT_DIM);
+    DrawTextC(s, r.x + 13, r.y + 46, 10, COLOR_TEXT_SEC);
   }
 }
 
@@ -350,13 +339,9 @@ static void draw_stat_card(Rectangle r, const char *label, const char *value,
 static void draw_panel_dashboard(int W, int H) {
   int y0 = 86;
   char buf[64], sub[128];
-  int random_mac_cnt = 0;
-  for (int i = 0; i < g_scan.device_count; i++)
-    if (g_scan.devices[i].is_random_mac)
-      random_mac_cnt++;
 
-  /* Ust istatistik karti: Cihaz / Gateway / Bu Cihaz / Rastgele MAC */
-  int cw = (W - 40) / 4;
+  /* Ust istatistik karti: Cihaz / Gateway / Bu Cihaz */
+  int cw = (W - 32) / 3;
   snprintf(buf, sizeof(buf), "%d", g_scan.total);
   snprintf(sub, sizeof(sub), "Ag: %s",
            g_scan.network_range[0] ? g_scan.network_range : "...");
@@ -376,12 +361,6 @@ static void draw_panel_dashboard(int W, int H) {
            g_scan.local_iface[0] ? g_scan.local_iface : "arayuz yok");
   draw_stat_card((Rectangle){12 + (cw + 4) * 2, y0, cw, 62}, "BU CIHAZ", buf,
                  COLOR_CYAN, sub);
-
-  snprintf(buf, sizeof(buf), "%d", random_mac_cnt);
-  snprintf(sub, sizeof(sub), "MAC randomizasyonu");
-  draw_stat_card((Rectangle){12 + (cw + 4) * 3, y0, cw, 62},
-                 "RASTGELE MAC", buf,
-                 random_mac_cnt > 0 ? COLOR_AMBER : COLOR_TEXT_DIM, sub);
 
   /* Sol: Cihaz listesi | Sag: Detay veya Log */
   int list_w = 300;
@@ -457,8 +436,7 @@ static void draw_panel_dashboard(int W, int H) {
       DrawTextC(d->ip, item_r.x + 15, iy + 6, 12, COLOR_ACCENT);
 
     /* MAC + tip etiketi alt satirda */
-    DrawTextC(d->mac, item_r.x + 14, iy + 21, 8,
-              d->is_random_mac ? ui_alpha(COLOR_RED, 200) : COLOR_TEXT_DIM);
+    DrawTextC(d->mac, item_r.x + 14, iy + 21, 8, COLOR_TEXT_DIM);
 
     int tagw = MeasureText(tag, 7) + 10;
     DrawRectangleRounded(
@@ -466,9 +444,6 @@ static void draw_panel_dashboard(int W, int H) {
         0.5f, 4, ui_alpha(tagc, 18));
     DrawTextC(tag, item_r.x + item_r.width - tagw, iy + 8, 7, tagc);
 
-    if (d->is_random_mac) {
-      DrawTextC("?", item_r.x + item_r.width - 18, iy + 20, 9, COLOR_RED);
-    }
     if (is_local) {
       draw_led(item_r.x + item_r.width - 16, iy + 25, 2.5f, COLOR_GREEN, 0);
     }
@@ -650,13 +625,7 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
                        : (is_local ? "BU CIHAZ (YEREL)" : "AG ISTEMCISI");
     DrawTextC(role, rx + 58, cy + 10, 10, rolec);
     DrawTextC(dev->ip, rx + 58, cy + 26, 17, COLOR_TEXT);
-    DrawTextC(dev->mac, rx + 58, cy + 46, 9,
-              dev->is_random_mac ? COLOR_RED : COLOR_TEXT_DIM);
-
-    if (dev->is_random_mac) {
-      DrawTextC("RANDOM MAC", rx + 58 + MeasureText(dev->mac, 9) + 12,
-                cy + 45, 8, COLOR_RED);
-    }
+    DrawTextC(dev->mac, rx + 58, cy + 46, 9, COLOR_TEXT_DIM);
     cy += 76;
 
     /* Ozellikler tablosu */
@@ -715,10 +684,6 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
     cy += 20;
 
     int fx = rx + 16;
-    if (dev->is_random_mac) {
-      draw_badge(fx, cy, "MAC randomize", 8, COLOR_RED);
-      fx += MeasureText("MAC randomize", 8) + 26;
-    }
     if (is_gw) {
       draw_badge(fx, cy, "Ag gecidi", 8, COLOR_AMBER);
       fx += MeasureText("Ag gecidi", 8) + 26;
@@ -726,10 +691,6 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
     if (is_local) {
       draw_badge(fx, cy, "Yerel cihaz", 8, COLOR_GREEN);
       fx += MeasureText("Yerel cihaz", 8) + 26;
-    }
-    if (!dev->is_random_mac && !is_gw && !is_local) {
-      draw_badge(fx, cy, "Bilinen MAC", 8, COLOR_GREEN);
-      fx += MeasureText("Bilinen MAC", 8) + 26;
     }
     cy += 26;
 
@@ -780,7 +741,7 @@ static void draw_panel_security(int W, int H) {
   char nbuf[16];
   for (int i = 0; i < 4; i++) {
     snprintf(nbuf, sizeof(nbuf), "%d", cats[i].val);
-    draw_stat_card((Rectangle){12 + i * (cw + 4), y0, cw, 56},
+    draw_stat_card((Rectangle){12 + i * (cw + 4), y0, cw, 62},
                    cats[i].label, nbuf, cats[i].color,
                    i == 0 ? "Aninda mudahale gerekli"
                           : (i == 1 ? "Oncelikli inceleme"
@@ -788,35 +749,33 @@ static void draw_panel_security(int W, int H) {
                                               : "Bilgilendirme")));
   }
 
-  int py = y0 + 64;
+  int py = y0 + 70;
 
   /* IDS durum paneli */
   DrawRoundedPanel((Rectangle){12, py, W - 24, 36}, COLOR_SURFACE,
                    ui_alpha(COLOR_BORDER, 160));
   draw_led(22, py + 18, 4, COLOR_ACCENT, 0);
-  DrawTextC("IDS", 30, py + 9, 12, COLOR_ACCENT);
-  DrawTextC("MOTOR", 30, py + 20, 7, COLOR_TEXT_DIM);
 
   snprintf(buf, sizeof(buf), "Kural: %d", g_ids.rule_count);
-  DrawTextC(buf, 90, py + 13, 10, COLOR_TEXT_SEC);
+  DrawTextC(buf, 36, py + 13, 10, COLOR_TEXT_SEC);
   snprintf(buf, sizeof(buf), "Paket: %lu",
            (unsigned long)g_ids.total_pkts_processed);
-  DrawTextC(buf, 190, py + 13, 10, COLOR_TEXT_SEC);
+  DrawTextC(buf, 136, py + 13, 10, COLOR_TEXT_SEC);
   snprintf(buf, sizeof(buf), "Akis: %d", g_ids.active_trackers);
-  DrawTextC(buf, 300, py + 13, 10, COLOR_TEXT_SEC);
+  DrawTextC(buf, 236, py + 13, 10, COLOR_TEXT_SEC);
   snprintf(buf, sizeof(buf), "Toplam Uyari: %lu",
            (unsigned long)g_ids.total_alerts);
-  DrawTextC(buf, 400, py + 13, 10, COLOR_TEXT_SEC);
+  DrawTextC(buf, 336, py + 13, 10, COLOR_TEXT_SEC);
 
-  /* Aktif izleme gostergesi */
+  /* Aktif izleme gostergesi (DURDUR butonu ile cakismayacak sekilde) */
   int monitoring = (g_capture_all || g_capture_active_ip[0]);
-  if (g_ids.running && monitoring) {
-    draw_led((float)(W - 250), (float)(py + 18), 4, COLOR_GREEN, 1);
-    DrawTextC("AKTIF IZLEME", W - 240, py + 12, 9, COLOR_GREEN);
-  } else {
-    draw_led((float)(W - 250), (float)(py + 18), 4, COLOR_TEXT_DIM, 0);
-    DrawTextC("PASIF", W - 240, py + 12, 9, COLOR_TEXT_DIM);
-  }
+  const char *sttxt = (g_ids.running && monitoring) ? "AKTIF IZLEME" : "PASIF";
+  Color stc = (g_ids.running && monitoring) ? COLOR_GREEN : COLOR_TEXT_DIM;
+  int stw = MeasureText(sttxt, 9);
+  int stx = W - 216 - stw;   /* sag kenar butonun ~26px solunda */
+  draw_led((float)(stx - 11), (float)(py + 18), 4, stc,
+           (g_ids.running && monitoring));
+  DrawTextC(sttxt, stx, py + 12, 9, stc);
 
   /* Tum Agi Izle / Durdur butonu */
   Rectangle mon_btn = {W - 190, py + 6, 100, 24};
@@ -959,29 +918,21 @@ static void draw_panel_tools(int W, int H) {
 
   /* --- Alt sekmeler (segment kontrol) --- */
   const char *stabs[] = {"Paket Izleme", "Port Tarayici"};
-  const char *sicn[] = {"PKT", "PRT"};
   Color sclr[] = {COLOR_CYAN, COLOR_ACCENT2};
   int stx = 16;
   for (int i = 0; i < 2; i++) {
-    int sw = MeasureText(stabs[i], 12) + 46;
+    int sw = MeasureText(stabs[i], 12) + 30;
     Rectangle sb = {(float)stx, (float)y0, (float)sw, 24};
     int sh = CheckCollisionPointRec(GetMousePosition(), sb);
     if (i == g_tools_subtab) {
       DrawRectangleRounded(sb, 0.45f, 4, COLOR_SELECTED);
       DrawRectangleRoundedLinesEx(sb, 0.45f, 4, 1.0f, ui_alpha(sclr[i], 150));
-      DrawRectangleRounded((Rectangle){sb.x + 5, sb.y + 4, 16, 16}, 0.3f, 4,
-                           ui_alpha(sclr[i], 60));
-      DrawTextC(sicn[i], sb.x + 8, sb.y + 6, 8, sclr[i]);
-      DrawTextC(stabs[i], sb.x + 26, sb.y + 6, 12, COLOR_TEXT);
+      DrawTextC(stabs[i], sb.x + 14, sb.y + 6, 12, COLOR_TEXT);
       DrawRectangle((int)sb.x + 8, (int)sb.y + 22, sw - 16, 2, sclr[i]);
     } else {
       if (sh)
         DrawRectangleRounded(sb, 0.45f, 4, (Color){255, 255, 255, 8});
-      DrawRectangleRounded((Rectangle){sb.x + 5, sb.y + 4, 16, 16}, 0.3f, 4,
-                           (Color){255, 255, 255, 12});
-      DrawTextC(sicn[i], sb.x + 8, sb.y + 6, 8,
-                sh ? COLOR_TEXT_SEC : COLOR_TEXT_DIM);
-      DrawTextC(stabs[i], sb.x + 26, sb.y + 6, 12,
+      DrawTextC(stabs[i], sb.x + 14, sb.y + 6, 12,
                 sh ? COLOR_TEXT_SEC : COLOR_TEXT_DIM);
     }
     if (sh && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
@@ -1015,12 +966,11 @@ static void draw_panel_tools(int W, int H) {
     /* --- Hedef IP secimi (scrollable liste) --- */
     DrawTextC("Hedef:", 24, cy, 10, COLOR_TEXT_SEC);
     if (g_nm_target[0]) {
-      DrawRectangleRounded(
-          (Rectangle){64, cy - 2, MeasureText(g_nm_target, 10) + 14, 15},
-          0.4f, 4, COLOR_SELECTED);
-      DrawRectangleRoundedLinesEx(
-          (Rectangle){64, cy - 2, MeasureText(g_nm_target, 10) + 14, 15},
-          0.4f, 4, 1.0f, ui_alpha(COLOR_ACCENT, 80));
+      int chip_w = 6 + MeasureText(g_nm_target, 10) + 12;
+      DrawRectangleRounded((Rectangle){64, cy - 2, chip_w, 15}, 0.4f, 4,
+                           COLOR_SELECTED);
+      DrawRectangleRoundedLinesEx((Rectangle){64, cy - 2, chip_w, 15}, 0.4f,
+                                  4, 1.0f, ui_alpha(COLOR_ACCENT, 80));
       DrawTextC(g_nm_target, 70, cy, 10, COLOR_ACCENT);
     }
     cy += 17;
@@ -1549,7 +1499,7 @@ static void draw_panel_tools(int W, int H) {
     /* --- Hedef IP secimi (chip + scrollable liste) --- */
     DrawTextC("Hedef:", 24, cy, 10, COLOR_TEXT_SEC);
     if (g_ps_target[0]) {
-      int chip_w = MeasureText(g_ps_target, 10) + 12;
+      int chip_w = 6 + MeasureText(g_ps_target, 10) + 12;
       DrawRectangleRounded((Rectangle){66, cy - 2, chip_w, 14}, 0.5f, 4,
                            ui_alpha(COLOR_ACCENT2, 26));
       DrawRectangleRoundedLinesEx((Rectangle){66, cy - 2, chip_w, 14}, 0.5f, 4,

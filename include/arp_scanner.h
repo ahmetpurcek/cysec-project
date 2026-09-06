@@ -34,7 +34,6 @@ typedef struct {
     RiskLevel risk;
     int  is_gateway;
     int  is_local;
-    int  is_random_mac;
     time_t discovered_at;
     time_t last_seen;
 } Device;
@@ -100,4 +99,5 @@ void scanner_log(const char *fmt, ...);
 void scanner_get_log(ScanLog *out);
 
 #endif /* ARP_SCANNER_H */
+
 

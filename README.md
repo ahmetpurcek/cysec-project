@@ -5,7 +5,7 @@ Raylib tabanlı, tek pencereden ağ keşfi, port taraması, canlı trafik izleme
 ## 📋 Özellikler
 
 - **Modern GUI** — Raylib + Raygui ile geliştirilmiş, çözünürlükten bağımsız ölçeklenen arayüz.
-- **Ağ Keşfi (ARP Scanner)** — Ağdaki cihazları tarar; rastgeleleştirilmiş MAC (randomized MAC) tespiti yapar.
+- **Ağ Keşfi (ARP Scanner)** — Ağdaki cihazları tarar ve sınıflandırır.
   - Linux: raw ARP soketleri ile sweep
   - Windows: native ICMP ping sweep (IcmpSendEcho) + `GetIpNetTable` ile ARP tablosu okuma
 - **Otonom Port Tarayıcı (AutoPort)** — Nmap bağımsız, çok kanallı (thread pool) port/servis analizi; TTL tabanlı OS tahmini.
@@ -37,10 +37,12 @@ Raylib tabanlı, tek pencereden ağ keşfi, port taraması, canlı trafik izleme
 
 ### Linux
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j4
-./build/guvenlik_merkezi
+cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release
+cmake --build build-linux -j4
+./build-linux/guvenlik_merkezi
 ```
+
+> Derleme çıktıları platforma göre ayrı klasörlerde tutulur: **`build-linux/`** (Linux) ve **`build-win/`** (Windows). Her ikisi de `.gitignore`'dadır, git'e girmez.
 
 ### Windows
 
@@ -54,18 +56,18 @@ setx NPCAP_SDK "C:\npcap-sdk-1.15"
 
 **2) Derleyin** — MinGW için (PowerShell veya cmd):
 ```bat
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j4
+cmake -S . -B build-win -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build build-win -j4
 ```
 MSVC için "x64 Native Tools Command Prompt for VS 2022" açın:
 ```bat
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j4
+cmake -S . -B build-win -DCMAKE_BUILD_TYPE=Release
+cmake --build build-win --config Release -j4
 ```
 
 **3) Çalıştırın:**
 ```bat
-.\build\guvenlik_merkezi.exe
+.\build-win\guvenlik_merkezi.exe
 ```
 
 CMake, Npcap SDK'yı sırayla şuralarda arar: `NPCAP_SDK` ortam değişkeni → `C:\Program Files\Npcap` → `C:\Program Files (x86)\Npcap`. Bulamazsa `WARNING` basar ve **stub modda** derler (uygulama açılır, canlı trafik/IDS paneli devre dışı olur).
@@ -76,7 +78,7 @@ CMake, Npcap SDK'yı sırayla şuralarda arar: `NPCAP_SDK` ortam değişkeni →
 SYN gibi raw tarama türleri ve libpcap yakalaması root ister:
 ```bash
 xhost +
-sudo ./build/guvenlik_merkezi
+sudo ./build-linux/guvenlik_merkezi
 ```
 
 ### Windows
@@ -118,5 +120,6 @@ gcc -std=c11 -D_GNU_SOURCE -Iinclude tests/filter_engine_test.c src/filter_engin
 │   └── utils.c             # Yardımcılar (hashmap, str, log)
 └── tests/                  # Birim/regresyon testleri
 ```
+
 
 
