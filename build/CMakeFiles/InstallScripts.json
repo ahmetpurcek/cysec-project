@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/robot/cysec-project/build/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
