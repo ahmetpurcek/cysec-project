@@ -234,7 +234,7 @@ static void draw_header(int W) {
   /* Marka: kalkan ikonu + baslik */
   draw_shield_icon(30, 23, 20, ui_alpha(COLOR_ACCENT, 40), COLOR_ACCENT);
   DrawTextC("CYBERSOC", 46, 9, 16, COLOR_TEXT);
-  DrawTextC("Akilli Sehir Guvenlik Merkezi", 46, 29, 8, COLOR_TEXT_DIM);
+  DrawTextC("Guvenlik Merkezi", 46, 29, 8, COLOR_TEXT_DIM);
 
   /* Saga yasli durum kumesi */
   char clock[16];
