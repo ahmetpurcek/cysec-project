@@ -72,10 +72,6 @@ typedef struct {
     int medium_risk;
 } ScanResults;
 
-/* ========== MAC Vendor Veritabanı ========== */
-void scanner_load_mac_vendors(const char *filepath);
-const char *scanner_get_vendor(const char *mac);
-
 /* ========== Tarama Fonksiyonları ========== */
 void scanner_init(void);
 void scanner_cleanup(void);
@@ -104,3 +100,4 @@ void scanner_log(const char *fmt, ...);
 void scanner_get_log(ScanLog *out);
 
 #endif /* ARP_SCANNER_H */
+

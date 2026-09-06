@@ -110,14 +110,9 @@ else()
         -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
     )
 endif()
-
-# mac-addresses.txt'yi build dizinine kopyala
-if(EXISTS "${CMAKE_SOURCE_DIR}/mac-addresses.txt")
-    configure_file("${CMAKE_SOURCE_DIR}/mac-addresses.txt" 
-                   "${CMAKE_BINARY_DIR}/mac-addresses.txt" COPYONLY)
-endif()
 message(STATUS "Platform: ${CMAKE_SYSTEM_NAME}")
 message(STATUS "Derleyici: ${CMAKE_C_COMPILER}")
+
 
 
 

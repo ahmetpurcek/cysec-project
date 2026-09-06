@@ -684,7 +684,7 @@ static void dissect_tls(PacketRecord *pkt, const u_char *data, int len, int base
                                     sni[nlen] = '\0';
                                     // Info'ya ekle
                                     char tmp[512];
-                                    snprintf(tmp, sizeof(tmp), "%s [SNI: %s]", pkt->info, sni);
+                                    snprintf(tmp, sizeof(tmp), "%.250s [SNI: %.250s]", pkt->info, sni);
                                     strncpy(pkt->info, tmp, sizeof(pkt->info) - 1);
                                 }
                             }

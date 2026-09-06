@@ -24,7 +24,6 @@ static ScanResults  g_results;
 static platform_mutex_t g_results_lock;
 static ScanLog      g_log;
 static platform_mutex_t g_log_lock;
-static HashMap      g_mac_vendors;
 static int          g_initialized = 0;
 static int          g_auto_scan_running = 0;
 
@@ -524,7 +523,6 @@ void scanner_init(void) {
     memset(&g_log, 0, sizeof(g_log));
     platform_mutex_init(&g_results_lock);
     platform_mutex_init(&g_log_lock);
-    hashmap_init(&g_mac_vendors);
     
     g_initialized = 1;
     scanner_log("ARP tarayici baslatildi");
@@ -535,6 +533,6 @@ void scanner_cleanup(void) {
     platform_sleep_ms(200);
     platform_mutex_destroy(&g_results_lock);
     platform_mutex_destroy(&g_log_lock);
-    hashmap_free(&g_mac_vendors);
     g_initialized = 0;
 }
+

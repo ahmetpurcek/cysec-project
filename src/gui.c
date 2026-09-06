@@ -599,7 +599,6 @@ static void draw_panel_security(int W, int H) {
 
 /* ========== Araclar Paneli (Port Scan) ========== */
 static char g_ps_target[MAX_IP_LEN] = {0};
-static float g_scroll_ps_results = 0;
 
 static void draw_panel_tools(int W, int H) {
   int y0 = 86;

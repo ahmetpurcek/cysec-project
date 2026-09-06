@@ -5,7 +5,7 @@ Raylib tabanlı, tek pencereden ağ keşfi, port taraması, canlı trafik izleme
 ## 📋 Özellikler
 
 - **Modern GUI** — Raylib + Raygui ile geliştirilmiş, çözünürlükten bağımsız ölçeklenen arayüz.
-- **Ağ Keşfi (ARP Scanner)** — Ağdaki cihazları tarar; MAC vendor sınıflandırması ve rastgeleleştirilmiş MAC tespiti yapar.
+- **Ağ Keşfi (ARP Scanner)** — Ağdaki cihazları tarar; rastgeleleştirilmiş MAC (randomized MAC) tespiti yapar.
   - Linux: raw ARP soketleri ile sweep
   - Windows: native ICMP ping sweep (IcmpSendEcho) + `GetIpNetTable` ile ARP tablosu okuma
 - **Otonom Port Tarayıcı (AutoPort)** — Nmap bağımsız, çok kanallı (thread pool) port/servis analizi; TTL tabanlı OS tahmini.
@@ -118,4 +118,5 @@ gcc -std=c11 -D_GNU_SOURCE -Iinclude tests/filter_engine_test.c src/filter_engin
 │   └── utils.c             # Yardımcılar (hashmap, str, log)
 └── tests/                  # Birim/regresyon testleri
 ```
+
 
