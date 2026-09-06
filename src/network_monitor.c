@@ -27,7 +27,15 @@
 #include <fcntl.h>
 #endif
 
-#ifdef PLATFORM_WINDOWS
+#if defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP)
+/* Windows: gerçek pcap API'si — Npcap SDK (npcap.com) ile derlenir, libwpcap'a bağlanır */
+#include <pcap.h>
+#elif defined(PLATFORM_WINDOWS)
+/* Npcap SDK'sız derleme: pcap sahte (stub) — canlı trafik izleme kapalı kalır,
+ * proje yine de derlenir; GUI, ARP tarama ve port tarama çalışır. */
+/* Stub dalda da IPv6 dissector gerekli: in6_addr, INET6_ADDRSTRLEN, inet_ntop */
+#include <winsock2.h>
+#include <ws2tcpip.h>
 typedef unsigned char u_char;
 struct dummy_timeval { long tv_sec; long tv_usec; };
 struct pcap_pkthdr {
@@ -37,9 +45,15 @@ struct pcap_pkthdr {
 };
 typedef void pcap_t;
 #define DLT_EN10MB 1
-static inline void *pcap_open_live(const char *device, int snaplen, int promisc, int to_ms, char *errbuf) { return NULL; }
-static inline int pcap_datalink(void *p) { return 1; }
-static inline void pcap_close(void *p) {}
+#define PCAP_ERRBUF_SIZE 256
+#define PCAP_ERROR_BREAK (-2)
+static inline void *pcap_open_live(const char *device, int snaplen, int promisc, int to_ms, char *errbuf) {
+    (void)device; (void)snaplen; (void)promisc; (void)to_ms;
+    if (errbuf) snprintf(errbuf, PCAP_ERRBUF_SIZE, "Npcap kurulu degil");
+    return NULL;
+}
+static inline int pcap_datalink(void *p) { (void)p; return 1; }
+static inline void pcap_close(void *p) { (void)p; }
 #endif
 
 static int initialized = 0;
@@ -56,7 +70,7 @@ static int total_captured = 0;  /* toplam yakalanan paket (kümülatif, sadece s
 /* ---- STATS ---- */
 static FullStats stats;
 
-#ifdef PLATFORM_LINUX
+#if defined(PLATFORM_LINUX) || (defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP))
 static pcap_t *pcap_handle = NULL;
 static int g_datalink_type = 1; /* DLT_EN10MB default */
 #endif
@@ -1185,7 +1199,7 @@ static void handle_packet(const struct pcap_pkthdr *header, const u_char *packet
 #endif
 
     /* IDS besleme: ham veri yalnizca Ethernet datalink'te guvenilir */
-#ifdef PLATFORM_LINUX
+#if defined(PLATFORM_LINUX) || (defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP))
     if (g_datalink_type == DLT_EN10MB)
         ids_process_packet(&pkt);
 #endif
@@ -1206,7 +1220,7 @@ static void handle_packet(const struct pcap_pkthdr *header, const u_char *packet
     platform_mutex_unlock(&global_lock);
 }
 
-#ifdef PLATFORM_LINUX
+#if defined(PLATFORM_LINUX) || (defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP))
 static void pcap_cb(u_char *user, const struct pcap_pkthdr *h, const u_char *pkt) {
     (void)user;
     handle_packet(h, pkt);
@@ -1488,7 +1502,7 @@ static void *procnet_fallback_thread(void *arg) {
 
 static void *monitor_thread(void *arg) {
     char *iface = (char *)arg;
-#ifdef PLATFORM_LINUX
+#if defined(PLATFORM_LINUX) || (defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP))
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t *handle = NULL;
 
@@ -1496,6 +1510,7 @@ static void *monitor_thread(void *arg) {
         /* Phase 0: Default route'un oldugu arayuzu oncelikle dene.
          * Trafik ve ARP spoof oradan aktigi icin dogru NIC budur;
          * "wlan once" secimi, wlan0 sessizken hic paket gostermez. */
+#ifdef PLATFORM_LINUX
         FILE *rf = fopen("/proc/net/route", "r");
         if (rf) {
             char line[256];
@@ -1521,9 +1536,33 @@ static void *monitor_thread(void *arg) {
                     fprintf(stderr, "[FULL_MONITOR] Default-route iface: %s\n", best_if);
             }
         }
+#endif /* PLATFORM_LINUX */
+
+#if defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP)
+        /* Phase 0 (Windows): varsayilan adaptoru GUID'inden bul ve NPF aygitini ac.
+         * Npcap aygit adlari \Device\NPF_{GUID} seklindedir. */
+        {
+            char guid_name[128];
+            if (platform_get_default_interface_guid(guid_name, sizeof(guid_name)) == 0) {
+                pcap_if_t *gd;
+                if (pcap_findalldevs(&gd, errbuf) >= 0 && gd) {
+                    for (pcap_if_t *d = gd; d && !handle; d = d->next) {
+                        if (strstr(d->name, guid_name)) {
+                            handle = try_open_ethernet(d->name, errbuf);
+                            if (handle)
+                                fprintf(stderr, "[FULL_MONITOR] Varsayilan adaptor: %s (%s)\n",
+                                        d->name, d->description ? d->description : "?");
+                        }
+                    }
+                    pcap_freealldevs(gd);
+                }
+            }
+        }
+#endif
 
         pcap_if_t *devs;
         if (!handle && pcap_findalldevs(&devs, errbuf) >= 0 && devs) {
+#ifdef PLATFORM_LINUX
             /*
              * Phase 1: Prefer known real network interfaces.
              * Order: wlan*, eth*, enp*, ens*, eno*, then "any".
@@ -1574,6 +1613,31 @@ static void *monitor_thread(void *arg) {
                 }
             }
 
+#else
+            /* Windows: dongusal (loopback) aygitlari atla; aciklamada varsayilan
+             * adaptorun FriendlyName'i gecen aygita, sonra ilk fiziksel aygita oncelik ver. */
+            char friendly[MAX_IFACE_LEN] = {0};
+            platform_get_default_interface(friendly, sizeof(friendly));
+
+            if (friendly[0]) {
+                for (pcap_if_t *d = devs; d && !handle; d = d->next) {
+                    if ((d->flags & PCAP_IF_LOOPBACK) || strstr(d->name, "Loopback"))
+                        continue;
+                    if (d->description && strstr(d->description, friendly)) {
+                        handle = try_open_ethernet(d->name, errbuf);
+                        if (handle)
+                            fprintf(stderr, "[FULL_MONITOR] Adaptor eslesti: %s (%s)\n",
+                                    d->name, d->description);
+                    }
+                }
+            }
+            for (pcap_if_t *d = devs; d && !handle; d = d->next) {
+                if ((d->flags & PCAP_IF_LOOPBACK) || strstr(d->name, "Loopback"))
+                    continue;
+                handle = try_open_ethernet(d->name, errbuf);
+            }
+#endif /* PLATFORM_LINUX */
+
             pcap_freealldevs(devs);
         }
     } else {
@@ -1600,10 +1664,18 @@ static void *monitor_thread(void *arg) {
         pcap_close(handle);
         pcap_handle = NULL;
     } else {
-        /* ===== FALLBACK: pcap failed, use /proc/net polling ===== */
+        /* ===== FALLBACK: pcap acilamadi ===== */
         fprintf(stderr, "[FULL_MONITOR] pcap failed: %s\n", errbuf);
+#ifdef PLATFORM_LINUX
         procnet_fallback_thread(NULL);
+#else
+        fprintf(stderr, "[FULL_MONITOR] Windows: Npcap kurulumunu ve yonetici yetkisini kontrol edin.\n");
+#endif
     }
+#endif
+#if defined(PLATFORM_WINDOWS) && !defined(HAVE_NPCAP)
+    fprintf(stderr, "[FULL_MONITOR] Windows: canli trafik izleme icin Npcap gerekir (npcap.com). "
+                    "Proje Npcap SDK'siz derlendigi icin pcap devre disi birakildi.\n");
 #endif
     free(iface);
     return NULL;
@@ -1620,7 +1692,7 @@ void full_monitor_start(const char *iface) {
 
 void full_monitor_stop(void) {
     running = 0;
-#ifdef PLATFORM_LINUX
+#if defined(PLATFORM_LINUX) || (defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP))
     if (pcap_handle) pcap_breakloop(pcap_handle);
 #endif
     platform_sleep_ms(150);  /* thread'in kapanması için kısa bekle */

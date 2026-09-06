@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 /* ==================================================================
  *   PAKET PARSE — raw_data üzerinden bağımsız minimal parser
@@ -36,6 +37,9 @@ typedef struct {
     uint32_t arp_sender_ip;
     uint8_t  src_mac[6];
     uint8_t  dst_mac[6];
+    uint32_t arp_target_ip;   /* ARP hedef IP (cerceve byte 38-41) */
+    const uint8_t *payload;   /* TCP/UDP L4 yuku (raw_data icinde) */
+    int      payload_len;
 } IdsPktInfo;
 
 static void ids_parse_pkt(const PacketRecord *pkt, IdsPktInfo *pi) {
@@ -63,6 +67,8 @@ static void ids_parse_pkt(const PacketRecord *pkt, IdsPktInfo *pi) {
         memcpy(pi->arp_sender_mac, r + 22, 6);
         pi->arp_sender_ip = (uint32_t)r[28] << 24 | (uint32_t)r[29] << 16 |
                             (uint32_t)r[30] << 8 | r[31];
+        pi->arp_target_ip = (uint32_t)r[38] << 24 | (uint32_t)r[39] << 16 |
+                            (uint32_t)r[40] << 8 | r[41];
         return;
     }
 
@@ -87,6 +93,11 @@ static void ids_parse_pkt(const PacketRecord *pkt, IdsPktInfo *pi) {
         pi->src_port = (l4[0] << 8) | l4[1];
         pi->dst_port = (l4[2] << 8) | l4[3];
         pi->tcp_flags = l4[13] & 0x3F;
+        int doff = (l4[12] >> 4) * 4;
+        if (doff >= 20 && l4len > doff) {
+            pi->payload = l4 + doff;
+            pi->payload_len = l4len - doff;
+        }
     } else if (proto == 17 && l4len >= 8) {
         pi->is_udp = 1;
         pi->src_port = (l4[0] << 8) | l4[1];
@@ -94,6 +105,10 @@ static void ids_parse_pkt(const PacketRecord *pkt, IdsPktInfo *pi) {
         if (pi->dst_port == 53 && l4len >= 12) {
             uint16_t qd = (l4[8] << 8) | l4[9];
             pi->is_dns = (qd > 0);
+        }
+        if (l4len > 8) {
+            pi->payload = l4 + 8;
+            pi->payload_len = l4len - 8;
         }
     } else if (proto == 1 && l4len >= 4) {
         pi->is_icmp = 1;
@@ -307,6 +322,265 @@ static const char *brute_force_sev(uint16_t dport) {
     }
 }
 
+/* ==================================================================
+ *   BINDING MAP — IP↔MAC esleme takibi (MAC degisimi / spoof icin)
+ * ================================================================== */
+
+#define IDS_BIND_MAX     256
+#define IDS_BIND_STABLE  2   /* degisiklik uyarisi icin gereken kararli gozlem */
+
+typedef struct {
+    uint32_t ip;
+    uint8_t  mac[6];
+    int      seen;          /* bu MAC ile gozlenme sayisi */
+    time_t   last_seen;
+    time_t   last_alert;
+    int      valid;
+} IdsBinding;
+
+static IdsBinding g_bindings[IDS_BIND_MAX];
+static int g_binding_count = 0;
+
+static int ids_binding_find(uint32_t ip) {
+    for (int i = 0; i < g_binding_count; i++)
+        if (g_bindings[i].valid && g_bindings[i].ip == ip) return i;
+    return -1;
+}
+
+static int ids_binding_new(void) {
+    int i;
+    if (g_binding_count < IDS_BIND_MAX) {
+        i = g_binding_count++;
+    } else {
+        /* Kap dolu: en eski kullanilan kayit geri donustur (LRU) */
+        i = 0;
+        for (int k = 1; k < IDS_BIND_MAX; k++)
+            if (g_bindings[k].last_seen < g_bindings[i].last_seen) i = k;
+    }
+    memset(&g_bindings[i], 0, sizeof(g_bindings[i]));
+    return i;
+}
+
+/* Guvenilir taban kayitlari (kendi MAC / gateway) icin binding baslat */
+static void ids_binding_seed(uint32_t ip, const uint8_t mac[6]) {
+    if (!ip || ids_mac_zero(mac)) return;
+    int i = ids_binding_find(ip);
+    if (i < 0) i = ids_binding_new();
+    g_bindings[i].ip = ip;
+    memcpy(g_bindings[i].mac, mac, 6);
+    g_bindings[i].seen = IDS_BIND_STABLE;
+    g_bindings[i].valid = 1;
+    g_bindings[i].last_seen = time(NULL);
+}
+
+/* Paketlerden IP->MAC eslesmesini ogren; kararli eslesme degisirse uyar */
+static void ids_learn_binding(const IdsPktInfo *pi) {
+    uint32_t claim_ip;
+    if (ids_mac_zero(pi->src_mac)) return;   /* sentetik cerceve: MAC yok */
+    claim_ip = pi->is_arp ? pi->arp_sender_ip : pi->src_ip;
+    if (!claim_ip) return;
+    if (claim_ip == g_gateway_ip || claim_ip == g_local_ip) return;
+
+    int i = ids_binding_find(claim_ip);
+    if (i < 0) {
+        i = ids_binding_new();
+        g_bindings[i].ip = claim_ip;
+        memcpy(g_bindings[i].mac, pi->src_mac, 6);
+        g_bindings[i].seen = 1;
+        g_bindings[i].valid = 1;
+        g_bindings[i].last_seen = time(NULL);
+        return;
+    }
+    IdsBinding *b = &g_bindings[i];
+    if (memcmp(b->mac, pi->src_mac, 6) != 0) {
+        if (b->seen >= IDS_BIND_STABLE) {
+            time_t now = time(NULL);
+            if (now - b->last_alert >= IDS_ALERT_COOLDOWN) {
+                char desc[128];
+                char ip[46];
+                ids_ip_to_str(claim_ip, ip, sizeof(ip));
+                b->last_alert = now;
+                snprintf(desc, sizeof(desc),
+                         "%s icin MAC %02x:%02x:%02x:%02x:%02x:%02x -> "
+                         "%02x:%02x:%02x:%02x:%02x:%02x degisti (spoof/roam?)",
+                         ip,
+                         b->mac[0], b->mac[1], b->mac[2],
+                         b->mac[3], b->mac[4], b->mac[5],
+                         pi->src_mac[0], pi->src_mac[1], pi->src_mac[2],
+                         pi->src_mac[3], pi->src_mac[4], pi->src_mac[5]);
+                ids_raise_alert("IP-MAC Eslesme Degisikligi", "YUKSEK",
+                                SCORE_YUKSEK, pi, desc);
+            }
+        }
+        memcpy(b->mac, pi->src_mac, 6);
+        b->seen = 1;
+    } else if (b->seen < IDS_BIND_STABLE) {
+        b->seen++;
+    }
+    b->last_seen = time(NULL);
+}
+
+/* ==================================================================
+ *   PAYLOAD IMZA MOTORU — L7 iceriginde saldiri deseni arama
+ * ================================================================== */
+
+#define IDS_PAYLOAD_SCAN 96  /* imza aramasinda incelenen on yuk (byte) */
+
+typedef struct {
+    const char *needle;
+    const char *sig;
+    const char *sev;
+    double      score;
+    int         request_only;   /* yalnizca istek yonunde (cevap degil) ara */
+} IdsSig;
+
+static const IdsSig g_sigs[] = {
+    /* Web / SQLi / XSS — istek yonu */
+    { "sqlmap",        "SQLMap (SQLi taramasi)",       "YUKSEK", SCORE_YUKSEK, 1 },
+    { "UNION SELECT",  "SQL Injection (UNION SELECT)", "YUKSEK", SCORE_YUKSEK, 1 },
+    { "OR 1=1",        "SQL Injection (OR 1=1)",       "YUKSEK", SCORE_YUKSEK, 1 },
+    { "<script",       "XSS (script etiketi)",         "YUKSEK", SCORE_YUKSEK, 1 },
+    { "onerror=",      "XSS (onerror)",                "ORTA",   SCORE_ORTA,   1 },
+    { "javascript:",   "XSS (javascript)",             "ORTA",   SCORE_ORTA,   1 },
+    /* Dosya erisimi / komut calistirma */
+    { "/etc/passwd",   "Dosya Erisim (/etc/passwd)",   "YUKSEK", SCORE_YUKSEK, 1 },
+    { "/etc/shadow",   "Dosya Erisim (/etc/shadow)",   "KRITIK", SCORE_KRITIK, 1 },
+    { "cmd.exe",       "Windows Komut (cmd.exe)",      "KRITIK", SCORE_KRITIK, 1 },
+    { "/bin/sh",       "Shell Erisim (/bin/sh)",       "KRITIK", SCORE_KRITIK, 1 },
+    { "whoami",        "Komut Calistirma (whoami)",    "YUKSEK", SCORE_YUKSEK, 1 },
+    { "<?php",         "PHP Kodu Enjeksiyonu",         "YUKSEK", SCORE_YUKSEK, 1 },
+    { "eval(",         "Kod Enjeksiyonu (eval)",       "YUKSEK", SCORE_YUKSEK, 1 },
+    /* Powershell / yuk indirme — her iki yon */
+    { "powershell",    "PowerShell Komutu",            "YUKSEK", SCORE_YUKSEK, 0 },
+    { "-enc",          "PowerShell EncodedCommand",    "KRITIK", SCORE_KRITIK, 1 },
+    { "IEX(",          "PowerShell IEX",               "KRITIK", SCORE_KRITIK, 1 },
+    { "wget ",         "Yuk Indirme (wget)",           "ORTA",   SCORE_ORTA,   0 },
+    { "curl ",         "Yuk Indirme (curl)",           "ORTA",   SCORE_ORTA,   0 },
+    { "base64",        "Base64 Kodlanmis Yuk",         "ORTA",   SCORE_ORTA,   0 },
+    /* Log4Shell (JNDI) */
+    { "jndi:",         "Log4Shell (JNDI)",             "KRITIK", SCORE_KRITIK, 0 },
+    { "${jndi:",       "Log4Shell (JNDI ekspr.)",      "KRITIK", SCORE_KRITIK, 0 },
+};
+#define IDS_SIG_COUNT (int)(sizeof(g_sigs) / sizeof(g_sigs[0]))
+
+static int ids_mem_ci_find(const uint8_t *hay, int hlen, const char *needle) {
+    int nlen = (int)strlen(needle);
+    if (nlen == 0 || nlen > hlen) return 0;
+    for (int i = 0; i + nlen <= hlen; i++) {
+        int j = 0;
+        for (; j < nlen; j++) {
+            char a = (char)hay[i + j];
+            char b = needle[j];
+            if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+            if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+            if (a != b) break;
+        }
+        if (j == nlen) return 1;
+    }
+    return 0;
+}
+
+static int ids_mem_has_run(const uint8_t *p, int n, uint8_t byte, int min_run) {
+    int run = 0;
+    for (int i = 0; i < n; i++) {
+        if (p[i] == byte) {
+            if (++run >= min_run) return 1;
+        } else {
+            run = 0;
+        }
+    }
+    return 0;
+}
+
+/* Payload'i alintiya cevir: basilabilir karakterler aynen, digerleri "..." */
+static void ids_excerpt(const uint8_t *p, int n, char *out, int outlen) {
+    int k = 0, i = 0;
+    while (i < n && k + 1 < outlen) {
+        unsigned char c = p[i];
+        if (c >= 0x20 && c < 0x7F) {
+            out[k++] = (char)c;
+            i++;
+        } else {
+            if (outlen - k < 4) break;
+            out[k++] = '.';
+            out[k++] = '.';
+            out[k++] = '.';
+            while (i < n && !(p[i] >= 0x20 && p[i] < 0x7F)) i++;
+        }
+    }
+    if (i < n && k + 3 < outlen) {
+        out[k++] = '.';
+        out[k++] = '.';
+        out[k++] = '.';
+    }
+    out[k] = '\0';
+}
+
+static void ids_check_payload(const IdsPktInfo *pi) {
+    const uint8_t *p = pi->payload;
+    int n = pi->payload_len;
+    int scan, is_request, i;
+    char k2[96];
+    char desc[160];
+    char ex[64];
+    IdsTracker *tr;
+
+    if (!p || n <= 0) return;
+    scan = n < IDS_PAYLOAD_SCAN ? n : IDS_PAYLOAD_SCAN;
+
+    /* IsteK yonu: kaynak port >= 1024 ise istemci istegi kabul et.
+     * Servis yanitlarinda (sport < 1024, orn. 80/443/53) yalnizca
+     * request_only olmayan imzalar aranir. */
+    is_request = (pi->src_port >= 1024);
+
+    for (i = 0; i < IDS_SIG_COUNT; i++) {
+        const IdsSig *sg = &g_sigs[i];
+        if (sg->request_only && !is_request) continue;
+        if (!ids_mem_ci_find(p, scan, sg->needle)) continue;
+
+        snprintf(k2, sizeof(k2), "G|%d|%u", i, pi->src_ip);
+        tr = ids_tracker_get(k2);
+        if (!tr) continue;
+        ids_tracker_bump(tr, 0);
+        if (!ids_tracker_can_alert(tr)) continue;
+
+        ids_excerpt(p, scan < 48 ? scan : 48, ex, sizeof(ex));
+        snprintf(desc, sizeof(desc), "L7 yukunde imza: %s | ilk veri: %s",
+                 sg->sig, ex);
+        ids_raise_alert(sg->sig, sg->sev, sg->score, pi, desc);
+    }
+
+    /* Shellcode sled'leri: NOP (0x90) / INT3 (0xCC) serileri */
+    if (ids_mem_has_run(p, n, 0x90, 8)) {
+        snprintf(k2, sizeof(k2), "G|NOP|%u", pi->src_ip);
+        tr = ids_tracker_get(k2);
+        if (tr) {
+            ids_tracker_bump(tr, 0);
+            if (ids_tracker_can_alert(tr)) {
+                ids_excerpt(p, scan < 48 ? scan : 48, ex, sizeof(ex));
+                snprintf(desc, sizeof(desc),
+                         ">=8 ardIsIk NOP (0x90) | ilk veri: %s", ex);
+                ids_raise_alert("Shellcode (NOP-sled)", "KRITIK", SCORE_KRITIK,
+                                pi, desc);
+            }
+        }
+    }
+    if (ids_mem_has_run(p, n, 0xCC, 8)) {
+        snprintf(k2, sizeof(k2), "G|INT3|%u", pi->src_ip);
+        tr = ids_tracker_get(k2);
+        if (tr) {
+            ids_tracker_bump(tr, 0);
+            if (ids_tracker_can_alert(tr)) {
+                ids_excerpt(p, scan < 48 ? scan : 48, ex, sizeof(ex));
+                snprintf(desc, sizeof(desc),
+                         ">=8 ardIsIk INT3 (0xCC) | ilk veri: %s", ex);
+                ids_raise_alert("Shellcode (INT3-sled)", "KRITIK", SCORE_KRITIK,
+                                pi, desc);
+            }
+        }
+    }
+}
+
 static void ids_check_rules(const IdsPktInfo *pi) {
     char key[96];
     IdsTracker *t;
@@ -331,14 +605,71 @@ static void ids_check_rules(const IdsPktInfo *pi) {
         }
     }
 
+    /* ---------- 1b. ARP IP cakismasi: yabanci MAC yerel IP'yi sahipleniyor ---------- */
+    if (pi->is_arp && g_local_ip && pi->arp_sender_ip == g_local_ip) {
+        int is_ours = (memcmp(pi->arp_sender_mac, g_local_mac, 6) == 0);
+        if (!is_ours) {
+            char desc[160];
+            char att_ip[46];
+            ids_ip_to_str(pi->arp_sender_ip, att_ip, sizeof(att_ip));
+            snprintf(desc, sizeof(desc),
+                     "Yabanci MAC (%02x:%02x:%02x:%02x:%02x:%02x) yerel IP %s icin ARP gonderiyor",
+                     pi->arp_sender_mac[0], pi->arp_sender_mac[1],
+                     pi->arp_sender_mac[2], pi->arp_sender_mac[3],
+                     pi->arp_sender_mac[4], pi->arp_sender_mac[5], att_ip);
+            ids_raise_alert("ARP IP Cakismasi (Spoof)", "KRITIK",
+                            SCORE_KRITIK, pi, desc);
+        }
+    }
+
+    /* ---------- 1c. ARP taramasi: tek MAC'ten cok hedefe ARP istegi ---------- */
+    if (pi->is_arp && pi->arp_opcode == 1) {
+        snprintf(key, sizeof(key), "A|%02x%02x%02x%02x%02x%02x",
+                 pi->arp_sender_mac[0], pi->arp_sender_mac[1],
+                 pi->arp_sender_mac[2], pi->arp_sender_mac[3],
+                 pi->arp_sender_mac[4], pi->arp_sender_mac[5]);
+        t = ids_tracker_get(key);
+        if (t) {
+            ids_tracker_bump(t, pi->arp_target_ip);
+            if (t->count >= 20 && t->unique_len >= 8 && ids_tracker_can_alert(t)) {
+                char desc[160];
+                char m[32];
+                snprintf(m, sizeof(m), "%02x:%02x:%02x:%02x:%02x:%02x",
+                         pi->arp_sender_mac[0], pi->arp_sender_mac[1],
+                         pi->arp_sender_mac[2], pi->arp_sender_mac[3],
+                         pi->arp_sender_mac[4], pi->arp_sender_mac[5]);
+                snprintf(desc, sizeof(desc),
+                         "%s -> %u farkli IP'ye ARP istegi (%u paket) - ag kesfi",
+                         m, t->unique_len, t->count);
+                ids_raise_alert("ARP Taramasi (Ag Kesfi)", "ORTA",
+                                SCORE_ORTA, pi, desc);
+            }
+        }
+    }
+
     /* ---------- 2. Kötü amaçlı portlara bağlantı ---------- */
     if (pi->is_tcp) {
+        static const struct MalPortDef { int port; const char *name; } mal_ports[] = {
+            { 4444,  "Meterpreter" },
+            { 31337, "BackOrifice" },
+            { 5555,  "Android ADB" },
+            { 6667,  "IRC (botnet?)" },
+            { 4445,  "Metasploit" },
+            { 1090,  "X-KeyStroke (RAT)" },
+            { 1099,  "Java RMI Registry" },
+            { 1524,  "Metasploit Backdoor (ingreslock)" },
+            { 6666,  "IRC Alt (botnet?)" },
+            { 54320, "BackOrifice 2000" },
+            { 54321, "BackOrifice 2000 (alt)" },
+            { 31338, "BackOrifice (UDP)" },
+        };
         const char *mal = NULL;
-        if (pi->dst_port == 4444)      mal = "Meterpreter";
-        else if (pi->dst_port == 31337) mal = "BackOrifice";
-        else if (pi->dst_port == 5555)  mal = "Android ADB";
-        else if (pi->dst_port == 6667)  mal = "IRC (botnet?)";
-        else if (pi->dst_port == 4445)  mal = "Metasploit";
+        for (size_t mi = 0; mi < sizeof(mal_ports) / sizeof(mal_ports[0]); mi++) {
+            if (pi->dst_port == mal_ports[mi].port) {
+                mal = mal_ports[mi].name;
+                break;
+            }
+        }
         if (mal) {
             char desc[128];
             snprintf(desc, sizeof(desc), "Kotu amacli port %d (%s) baglantisi",
@@ -408,6 +739,23 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                                     SCORE_KRITIK, pi, desc);
                 }
             }
+
+            /* Yatay tarama: ayni porta cok farkli hedefe SYN (tek kaynak) */
+            snprintf(key, sizeof(key), "Y|%u|%u", pi->src_ip, pi->dst_port);
+            t = ids_tracker_get(key);
+            if (t) {
+                ids_tracker_bump(t, pi->dst_ip);
+                if (t->count >= 8 && t->unique_len >= 6 && ids_tracker_can_alert(t)) {
+                    char desc[128];
+                    char s[46];
+                    ids_ip_to_str(pi->src_ip, s, sizeof(s));
+                    snprintf(desc, sizeof(desc),
+                             "%s -> %u farkli hedefe port %u SYN (yatay tarama)",
+                             s, t->unique_len, pi->dst_port);
+                    ids_raise_alert("Yatay Tarama (Ayni Port)", "YUKSEK",
+                                    SCORE_YUKSEK, pi, desc);
+                }
+            }
         }
 
         /* Stealth tarama tipleri */
@@ -437,6 +785,30 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                 if (t->count >= 15 && t->unique_len >= 5 && ids_tracker_can_alert(t))
                     ids_raise_alert("Port Taramasi (Xmas)", "YUKSEK",
                                     SCORE_YUKSEK, pi, "FIN+PSH+URG (Xmas) paketlerle stealth tarama");
+            }
+        }
+
+        /* Bogus bayrak kombinasyonlari (TCP yiginlari kabul etmez) */
+        if (pi->tcp_flags == 0x03 || pi->tcp_flags == 0x05 ||
+            pi->tcp_flags == 0x06) {
+            const char *bogus = "SYN+FIN";
+            if (pi->tcp_flags == 0x05)      bogus = "FIN+RST";
+            else if (pi->tcp_flags == 0x06) bogus = "SYN+RST";
+            snprintf(key, sizeof(key), "W|%02x|%u", pi->tcp_flags, pi->src_ip);
+            t = ids_tracker_get(key);
+            if (t) {
+                ids_tracker_bump(t, ids_hash_unique(pi->dst_ip, pi->dst_port));
+                if (t->count >= 4 && t->unique_len >= 2 && ids_tracker_can_alert(t)) {
+                    char desc[128];
+                    char sig[64];
+                    char s[46];
+                    ids_ip_to_str(pi->src_ip, s, sizeof(s));
+                    snprintf(sig, sizeof(sig), "Bogus Bayrak (%s)", bogus);
+                    snprintf(desc, sizeof(desc),
+                             "%s tarafindan %u farkli hedef/porta %s bayrakli %u paket",
+                             s, t->unique_len, bogus, t->count);
+                    ids_raise_alert(sig, "ORTA", SCORE_ORTA, pi, desc);
+                }
             }
         }
     }
@@ -493,6 +865,9 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                                 "Asiri broadcast/multicast trafigi (ag yavaslamasi)");
         }
     }
+
+    /* ---------- 7. L7 payload imza taramasi ---------- */
+    ids_check_payload(pi);
 }
 
 /* ==================================================================
@@ -507,13 +882,15 @@ void ids_init(void) {
     g_alert_count = 0;
     memset(g_trackers, 0, sizeof(g_trackers));
     g_tracker_count = 0;
+    memset(g_bindings, 0, sizeof(g_bindings));
+    g_binding_count = 0;
     memset(g_local_mac, 0, sizeof(g_local_mac));
     memset(g_gateway_mac, 0, sizeof(g_gateway_mac));
     g_gateway_mac_valid = 0;
     g_gateway_ip = 0;
     g_local_ip = 0;
     g_ids.running = 1;
-    g_ids.rule_count = 14;
+    g_ids.rule_count = 20;
     g_ids_initialized = 1;
 }
 
@@ -538,6 +915,7 @@ void ids_process_packet(const PacketRecord *pkt) {
     if (ids_is_self_originated(&pi)) return;
 
     g_ids.total_pkts_processed++;
+    ids_learn_binding(&pi);
     ids_check_rules(&pi);
     g_ids.active_trackers = g_tracker_count;
 }
@@ -580,6 +958,14 @@ void ids_set_mac_context(const char *local_mac, const char *gateway_mac,
         if (sscanf(local_ip, "%u.%u.%u.%u", &a, &c, &d, &e) == 4)
             g_local_ip = (a << 24) | (c << 16) | (d << 8) | e;
     }
+
+    /* Binding map'ine guvenilir taban kayitlarini ekle */
+    if (g_gateway_ip && g_gateway_mac_valid)
+        ids_binding_seed(g_gateway_ip, g_gateway_mac);
+    if (g_local_ip && !ids_mac_zero(g_local_mac))
+        ids_binding_seed(g_local_ip, g_local_mac);
 }
+
+
 
 

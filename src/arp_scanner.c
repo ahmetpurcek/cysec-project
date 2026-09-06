@@ -11,6 +11,14 @@
 #include <ctype.h>
 #include <time.h>
 
+#ifdef PLATFORM_WINDOWS
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <iphlpapi.h>
+#include <icmpapi.h>
+#endif
+
 /* ========== Global State ========== */
 static ScanResults  g_results;
 static platform_mutex_t g_results_lock;
@@ -49,6 +57,67 @@ void scanner_get_log(ScanLog *out) {
     platform_mutex_unlock(&g_log_lock);
 }
 
+#ifdef PLATFORM_WINDOWS
+
+/* Windows: 'start /B ping' komutu yerine native ICMP ping sweep.
+ * Hedeflere tek tek IcmpSendEcho gonderilir; yanit alinan her IP icin
+ * ARP tablosuna girdi dusmesi icin kisa bir bekleme yapilir. */
+#define WIN_PING_TIMEOUT_MS  700
+#define WIN_PING_THREADS     8
+#define WIN_PING_SLICE       32
+
+typedef struct {
+    unsigned int a, b, c;   /* ag adresinin ilk 3 okteti */
+    int start, end;         /* taranacak son oktet araligi [start, end] */
+} WinPingSlice;
+
+static void *_win_ping_worker(void *arg) {
+    WinPingSlice *s = (WinPingSlice *)arg;
+    HANDLE icmp = IcmpCreateFile();
+    if (icmp == INVALID_HANDLE_VALUE) return NULL;
+
+    unsigned char payload[8] = {0};
+    unsigned char reply[sizeof(ICMP_ECHO_REPLY) + 32];
+
+    for (int i = s->start; i <= s->end; i++) {
+        char ip[32];
+        IPAddr dest = 0;
+        snprintf(ip, sizeof(ip), "%u.%u.%u.%u", s->a, s->b, s->c, (unsigned)i);
+        inet_pton(AF_INET, ip, &dest);
+        if (dest == 0) continue;
+        if (IcmpSendEcho(icmp, dest, payload, sizeof(payload), NULL,
+                         reply, sizeof(reply), WIN_PING_TIMEOUT_MS) != 0) {
+            Sleep(5); /* ARP girdisinin yazilmasi icin kisa nefes */
+        }
+    }
+    IcmpCloseHandle(icmp);
+    return NULL;
+}
+
+static void _win_ping_sweep(unsigned int a, unsigned int b, unsigned int c) {
+    static WinPingSlice slices[WIN_PING_THREADS];
+    platform_thread_t th[WIN_PING_THREADS];
+    int started = 0;
+
+    int base = 1;
+    for (int n = 0; n < WIN_PING_THREADS && base <= 254; n++) {
+        int e = base + WIN_PING_SLICE - 1;
+        if (e > 254) e = 254;
+        slices[n].a = a; slices[n].b = b; slices[n].c = c;
+        slices[n].start = base;
+        slices[n].end   = e;
+        base = e + 1;
+
+        if (platform_thread_create(&th[started], _win_ping_worker, &slices[n]) == 0)
+            started++;
+    }
+    for (int i = 0; i < started; i++) {
+        WaitForSingleObject(th[i], INFINITE);
+        CloseHandle(th[i]);
+    }
+}
+#endif /* PLATFORM_WINDOWS */
+
 /* ========== ARP Tarama (Fallback: ping + arp tablosu) ========== */
 static int _scan_with_arp_table(Device *devices, int max_devices, const char *network_range) {
     int count = 0;
@@ -61,26 +130,23 @@ static int _scan_with_arp_table(Device *devices, int max_devices, const char *ne
         return 0;
     }
     
-    /* Her 10 IP'yi paralel olarak pingle */
+#ifdef PLATFORM_LINUX
+    /* Her 20 IP'yi paralel olarak pingle */
     for (int batch_start = 1; batch_start <= 254; batch_start += 20) {
         char cmd[2048] = {0};
         int cmd_len = 0;
         for (int i = batch_start; i < batch_start + 20 && i <= 254; i++) {
-#ifdef PLATFORM_LINUX
             cmd_len += snprintf(cmd + cmd_len, sizeof(cmd) - cmd_len,
                 "ping -c 1 -W 1 %d.%d.%d.%d >/dev/null 2>&1 & ",
                 base_parts[0], base_parts[1], base_parts[2], i);
-#else
-            cmd_len += snprintf(cmd + cmd_len, sizeof(cmd) - cmd_len,
-                "start /B ping -n 1 -w 500 %d.%d.%d.%d >NUL 2>&1 & ",
-                base_parts[0], base_parts[1], base_parts[2], i);
-#endif
         }
-#ifdef PLATFORM_LINUX
         strcat(cmd, "wait 2>/dev/null");
-#endif
         platform_run_command(cmd, NULL, 0);
     }
+#else
+    /* Windows: cmd 'start /B ping' yerine native ICMP sweep (IcmpSendEcho) */
+    _win_ping_sweep(base_parts[0], base_parts[1], base_parts[2]);
+#endif
     
     scanner_log("Ping sweep tamamlandi, ARP tablosu okunuyor...");
     platform_sleep_ms(500);
@@ -172,8 +238,65 @@ static int _scan_with_arp_table(Device *devices, int max_devices, const char *ne
         }
     }
 #else
-    /* Windows: arp -a komutu */
+    /* Windows: GetIpNetTable ile ARP tablosunu dogrudan oku;
+     * basarisiz olursa eski 'arp -a' parse yolu fallback olarak kalir. */
     {
+        int win_arp_ok = 0;
+        DWORD tbl_size = 0;
+        if (GetIpNetTable(NULL, &tbl_size, FALSE) == ERROR_INSUFFICIENT_BUFFER &&
+            tbl_size > 0) {
+            PMIB_IPNETTABLE tbl = (PMIB_IPNETTABLE)malloc((size_t)tbl_size);
+            if (tbl) {
+                if (GetIpNetTable(tbl, &tbl_size, FALSE) == NO_ERROR) {
+                    win_arp_ok = 1;
+                    for (DWORD ri = 0; ri < tbl->dwNumEntries && count < max_devices; ri++) {
+                        MIB_IPNETROW *row = &tbl->table[ri];
+                        const unsigned char *m;
+                        char ip[64], mac[32];
+
+                        if (row->dwType == MIB_IPNET_TYPE_INVALID) continue;
+                        if (row->dwAddr == 0 ||
+                            (row->dwAddr & 0xFF) == 0 || (row->dwAddr & 0xFF) == 0xFF)
+                            continue;
+                        if (row->dwPhysAddrLen < 6) continue;
+                        m = row->bPhysAddr;
+                        if (m[0] == 0 && m[1] == 0 && m[2] == 0 &&
+                            m[3] == 0 && m[4] == 0 && m[5] == 0)
+                            continue;
+
+                        snprintf(ip, sizeof(ip), "%u.%u.%u.%u",
+                                 (unsigned)(row->dwAddr & 0xFF),
+                                 (unsigned)((row->dwAddr >> 8) & 0xFF),
+                                 (unsigned)((row->dwAddr >> 16) & 0xFF),
+                                 (unsigned)((row->dwAddr >> 24) & 0xFF));
+                        snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                                 m[0], m[1], m[2], m[3], m[4], m[5]);
+
+                        int duplicate = 0;
+                        for (int i = 0; i < seen_count; i++) {
+                            if (strcmp(seen_ips[i], ip) == 0) { duplicate = 1; break; }
+                        }
+                        if (duplicate) continue;
+                        strncpy(seen_ips[seen_count++], ip, MAX_IP_LEN);
+
+                        Device *d = &devices[count];
+                        memset(d, 0, sizeof(Device));
+                        strncpy(d->ip, ip, MAX_IP_LEN);
+                        strncpy(d->mac, mac, MAX_MAC_LEN);
+                        str_upper(d->mac);
+                        d->vendor[0] = '\0';
+                        platform_get_hostname(ip, d->hostname, MAX_HOSTNAME_LEN);
+                        d->discovered_at = time(NULL);
+                        d->last_seen = time(NULL);
+                        count++;
+                    }
+                    scanner_log("GetIpNetTable: %d girdi okundu", count);
+                }
+                free(tbl);
+            }
+        }
+        if (!win_arp_ok) {
+        /* fallback: 'arp -a' komutu (GetIpNetTable yoksa/basarisizsa) */
         char output[MAX_CMD_OUTPUT];
         if (platform_run_command("arp -a", output, sizeof(output)) == 0) {
             char *line = strtok(output, "\n");
@@ -182,9 +305,9 @@ static int _scan_with_arp_table(Device *devices, int max_devices, const char *ne
                 /* Format: "  192.168.1.1          aa-bb-cc-dd-ee-ff     dynamic" */
                 if (sscanf(line, " %s %s %s", ip, mac, type) == 3) {
                     if (strchr(ip, '.') && strlen(mac) >= 11) {
-                        /* MAC formatını normalize et (- → :) */
+                        /* MAC formatini normalize et (- -> :) */
                         for (char *p = mac; *p; p++) if (*p == '-') *p = ':';
-                        
+
                         int duplicate = 0;
                         for (int i = 0; i < seen_count; i++) {
                             if (strcmp(seen_ips[i], ip) == 0) { duplicate = 1; break; }
@@ -207,8 +330,10 @@ static int _scan_with_arp_table(Device *devices, int max_devices, const char *ne
                 line = strtok(NULL, "\n");
             }
         }
+        }
     }
 #endif
+
     
     scanner_log("ARP tablosundan %d cihaz bulundu", count);
     return count;

@@ -270,10 +270,69 @@ void platform_mutex_destroy(platform_mutex_t *mutex) {
 /* ========== Ağ Bilgisi — Windows ========== */
 #ifdef PLATFORM_WINDOWS
 
+/* GetAdaptersAddresses tamponu yeterli gelmezse ERROR_BUFFER_OVERFLOW doner;
+ * tamponu buyuterek tekrar dene. Cagiran taraf free() ile birakmali. */
+static IP_ADAPTER_ADDRESSES *win_get_adapters(ULONG flags) {
+    ULONG buflen = 15000;
+    for (int tries = 0; tries < 4; tries++) {
+        IP_ADAPTER_ADDRESSES *a = (IP_ADAPTER_ADDRESSES *)malloc(buflen);
+        if (!a) return NULL;
+        ULONG r = GetAdaptersAddresses(AF_INET, flags, NULL, a, &buflen);
+        if (r == ERROR_SUCCESS) return a;
+        free(a);
+        if (r != ERROR_BUFFER_OVERFLOW) return NULL;
+        buflen *= 2;
+    }
+    return NULL;
+}
+
 int platform_get_default_interface(char *iface, int len) {
-    /* Windows'ta arayüz ismi yerine adaptör index'i kullanılır */
-    strncpy(iface, "default", len);
-    return 0;
+    IP_ADAPTER_ADDRESSES *addrs = win_get_adapters(GAA_FLAG_INCLUDE_GATEWAYS);
+    if (!addrs) { strncpy(iface, "default", len); return -1; }
+    int ret = -1;
+    for (IP_ADAPTER_ADDRESSES *cur = addrs; cur; cur = cur->Next) {
+        if (cur->OperStatus != IfOperStatusUp) continue;
+        if (cur->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        if (cur->PhysicalAddressLength == 0) continue;
+        char fn[128] = {0};
+        WideCharToMultiByte(CP_UTF8, 0, cur->FriendlyName, -1,
+                            fn, sizeof(fn) - 1, NULL, NULL);
+        strncpy(iface, fn, len);
+        iface[len - 1] = '\0';
+        ret = 0;
+        break;
+    }
+    free(addrs);
+    if (ret != 0) strncpy(iface, "default", len);
+    return ret;
+}
+
+int platform_get_default_interface_guid(char *out, int len) {
+    out[0] = '\0';
+    /* Varsayilan rotanin cikis arayuzunun IfIndex'ini bul (8.8.8.8'e giden yol) */
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(80);
+    inet_pton(AF_INET, "8.8.8.8", &dst.sin_addr);
+    DWORD ifindex = 0;
+    if (GetBestInterfaceEx((struct sockaddr *)&dst, &ifindex) != NO_ERROR)
+        return -1;
+
+    IP_ADAPTER_ADDRESSES *addrs = win_get_adapters(0);
+    if (!addrs) return -1;
+    int ret = -1;
+    for (IP_ADAPTER_ADDRESSES *cur = addrs; cur; cur = cur->Next) {
+        if (cur->IfIndex == ifindex && cur->AdapterName) {
+            /* AdapterName = "{GUID}" metni (NPF aygit adinin son eki) */
+            strncpy(out, cur->AdapterName, len);
+            out[len - 1] = '\0';
+            ret = 0;
+            break;
+        }
+    }
+    free(addrs);
+    return ret;
 }
 
 int platform_get_local_ip(const char *iface, char *ip, int len) {
@@ -298,13 +357,9 @@ int platform_get_local_ip(const char *iface, char *ip, int len) {
 
 int platform_get_local_mac(const char *iface, char *mac, int len) {
     (void)iface;
-    IP_ADAPTER_ADDRESSES *addrs = NULL;
-    ULONG buflen = 15000;
-    addrs = (IP_ADAPTER_ADDRESSES *)malloc(buflen);
-    
-    if (GetAdaptersAddresses(AF_INET, 0, NULL, addrs, &buflen) == ERROR_SUCCESS) {
-        IP_ADAPTER_ADDRESSES *cur = addrs;
-        while (cur) {
+    IP_ADAPTER_ADDRESSES *addrs = win_get_adapters(0);
+    if (addrs) {
+        for (IP_ADAPTER_ADDRESSES *cur = addrs; cur; cur = cur->Next) {
             if (cur->PhysicalAddressLength == 6 && cur->OperStatus == IfOperStatusUp) {
                 unsigned char *m = cur->PhysicalAddress;
                 snprintf(mac, len, "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -312,34 +367,30 @@ int platform_get_local_mac(const char *iface, char *mac, int len) {
                 free(addrs);
                 return 0;
             }
-            cur = cur->Next;
         }
+        free(addrs);
     }
-    free(addrs);
     strncpy(mac, "00:00:00:00:00:00", len);
     return -1;
 }
 
 int platform_get_gateway(char *ip, int len, char *mac, int mac_len) {
-    IP_ADAPTER_ADDRESSES *addrs = NULL;
-    ULONG buflen = 15000;
-    addrs = (IP_ADAPTER_ADDRESSES *)malloc(buflen);
-    
-    if (GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_GATEWAYS, NULL, addrs, &buflen) == ERROR_SUCCESS) {
-        IP_ADAPTER_ADDRESSES *cur = addrs;
-        while (cur) {
+    IP_ADAPTER_ADDRESSES *addrs = win_get_adapters(GAA_FLAG_INCLUDE_GATEWAYS);
+    if (addrs) {
+        for (IP_ADAPTER_ADDRESSES *cur = addrs; cur; cur = cur->Next) {
             IP_ADAPTER_GATEWAY_ADDRESS_LH *gw = cur->FirstGatewayAddress;
             if (gw && cur->OperStatus == IfOperStatusUp) {
                 struct sockaddr_in *sa = (struct sockaddr_in *)gw->Address.lpSockaddr;
-                inet_ntop(AF_INET, &sa->sin_addr, ip, len);
-                if (mac) strncpy(mac, "N/A", mac_len);
-                free(addrs);
-                return 0;
+                if (sa->sin_family == AF_INET) {
+                    inet_ntop(AF_INET, &sa->sin_addr, ip, len);
+                    if (mac) strncpy(mac, "N/A", mac_len);
+                    free(addrs);
+                    return 0;
+                }
             }
-            cur = cur->Next;
         }
+        free(addrs);
     }
-    free(addrs);
     return -1;
 }
 
