@@ -42,9 +42,10 @@ typedef struct {
 void arp_block_init(void);
 void arp_block_cleanup(void);
 
-/* Bağlamı ayarla (iface, yerel MAC, gateway IP/MAC) — GUI her karede günceller */
+/* Bağlamı ayarla (iface, yerel MAC, gateway IP/MAC, yerel IP) — GUI her karede günceller */
 int  arp_block_set_context(const char *iface, const char *local_mac,
-                           const char *gateway_ip, const char *gateway_mac);
+                           const char *gateway_ip, const char *gateway_mac,
+                           const char *local_ip);
 
 /* Engelle / geri al. block=1 engelle, 0 geri al.
  * target_mac: hedefin MAC'i ("" ise motor ARP ile çözmeye çalışır).
@@ -59,4 +60,3 @@ void arp_block_get_snapshot(ArpBlockSnapshot *out);
 int  arp_block_engine_ok(void);
 
 #endif /* ARP_BLOCK_H */
-

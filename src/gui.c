@@ -2120,7 +2120,8 @@ void gui_draw(void) {
     ids_set_mac_context(g_scan.local_mac, g_scan.gateway_mac,
                         g_scan.gateway_ip, g_scan.local_ip);
     arp_block_set_context(g_scan.local_iface, g_scan.local_mac,
-                          g_scan.gateway_ip, g_scan.gateway_mac);
+                          g_scan.gateway_ip, g_scan.gateway_mac,
+                          g_scan.local_ip);
     blocklist_refresh();
     g_ids_alert_count =
         ids_get_alerts_snapshot(g_ids_alerts_snapshot, IDS_MAX_GUI_ALERTS);

@@ -10,7 +10,7 @@ Raylib tabanlı, tek pencereden ağ keşfi, port taraması, canlı trafik izleme
   - Windows: native ICMP ping sweep (IcmpSendEcho) + `GetIpNetTable` ile ARP tablosu okuma
 - **Ağdan Kesme (ARP Black-Hole)** — Seçilen cihazın ağ erişimini anında keser/geri verir.
   - Linux: raw AF_PACKET soketleri ile hedefe sürekli sahte ARP yanıtı göndererek (black-hole) cihazın trafiğini kara deliğe yönlendirir.
-  - Windows: özellik şu anda stub'dır; motor `engine_ok = 0` döner, GUI güvenli biçimde "MOTOR YOK" gösterir ve butonları pasifleştirir.
+  - Windows: Npcap `pcap_sendpacket` ile aynı çift yönlü ARP zehirleme + geri alma motoru çalışır; Npcap kurulu ve Yönetici yetkisi gerekir (SDK'sız derlemede güvenli stub moda düşer).
   - Cihaz listesi satırlarındaki hızlı **KES/AC** düğmeleri, cihaz detayındaki **Ağdan Kes/Geri Ver** butonu ve sol alttaki **ENGELLENEN CİHAZLAR** paneli (Geri Al) üzerinden kullanılır.
   - Ağ geçidi (gateway) ve yerel cihaz (bu cihaz) ipuçları motor tarafından engellenemez.
 - **Otonom Port Tarayıcı (AutoPort)** — Nmap bağımsız, çok kanallı (thread pool) port/servis analizi; TTL tabanlı OS tahmini.
@@ -32,11 +32,11 @@ Raylib tabanlı, tek pencereden ağ keşfi, port taraması, canlı trafik izleme
 - CMake 3.16+
 - Derleyici: **MinGW-w64 (GCC)** veya **MSVC (Visual Studio 2019/2022 Build Tools)**
 - *(Raylib, CMake yapılandırması sırasında internetten otomatik indirilip derlenir)*
-- **Npcap (çalışma zamanı)** — canlı trafik izleme ve IDS için: https://npcap.com/#download
+- **Npcap (çalışma zamanı)** — canlı trafik izleme, IDS ve Ağdan Kesme için: https://npcap.com/#download
   - Kurulum sırasında **"WinPcap API-compatible Mode"** seçili kalmalı.
-- **Npcap SDK** — canlı trafik desteğiyle derlemek için: https://npcap.com/#download
+- **Npcap SDK** — canlı trafik, IDS ve Ağdan Kesme desteğiyle derlemek için: https://npcap.com/#download
 
-> SDK'sız da derleme **başarılı olur**; bu durumda GUI, ARP taraması ve port taraması çalışır, yalnızca canlı trafik izleme ve IDS kapalı (stub) gelir.
+> SDK'sız da derleme **başarılı olur**; bu durumda GUI, ARP taraması ve port taraması çalışır; canlı trafik izleme, IDS ve Ağdan Kesme kapalı (stub) gelir.
 
 ## 🚀 Kurulum ve Derleme
 
@@ -51,10 +51,11 @@ cmake --build build-linux -j4
 
 ### Windows
 
-**1) Npcap SDK'yı hazırlayın** (canlı trafik + IDS istiyorsanız):
+**1) Npcap SDK'yı hazırlayın** (canlı trafik + IDS + Ağdan Kesme istiyorsanız):
 ```bat
 :: SDK'yı zip'ten çıkardıktan sonra ortam değişkeni verin (örnek yol):
-setx NPCAP_SDK "C:\npcap-sdk-1.15"
+setx NPCAP_SDK "C:\npcap-sdk-1.13"
+:: indirme: https://npcap.com/dist/npcap-sdk-1.13.zip
 :: alternatif: SDK'yı C:\Program Files\Npcap altına kurarsanız otomatik bulunur
 :: yeni bir terminal açın (setx kalıcıdır, mevcut oturuma etki etmez)
 ```
@@ -75,7 +76,7 @@ cmake --build build-win --config Release -j4
 .\build-win\guvenlik_merkezi.exe
 ```
 
-CMake, Npcap SDK'yı sırayla şuralarda arar: `NPCAP_SDK` ortam değişkeni → `C:\Program Files\Npcap` → `C:\Program Files (x86)\Npcap`. Bulamazsa `WARNING` basar ve **stub modda** derler (uygulama açılır, canlı trafik/IDS paneli devre dışı olur).
+CMake, Npcap SDK'yı sırayla şuralarda arar: `NPCAP_SDK` ortam değişkeni → `C:\Program Files\Npcap` → `C:\Program Files (x86)\Npcap`. Bulamazsa `WARNING` basar ve **stub modda** derler (uygulama açılır; canlı trafik/IDS paneli ve Ağdan Kesme motoru devre dışı olur).
 
 ## 🏁 Çalıştırma Notları
 
@@ -88,7 +89,8 @@ sudo ./build-linux/guvenlik_merkezi
 
 ### Windows
 - Ağ taramalarının (ICMP sweep, port taraması, paket yakalama) doğru çalışması için uygulamayı **Yönetici Olarak Çalıştırın**.
-- Canlı trafik + IDS için **Npcap** kurulu olmalı (WinPcap API-compatible Mode). SDK yalnızca derleme sırasında gerekir.
+- Canlı trafik, IDS ve **Ağdan Kesme** için **Npcap** kurulu olmalı (WinPcap API-compatible Mode). SDK yalnızca derleme sırasında gerekir.
+- Ağdan Kesme Windows'ta Npcap `pcap_sendpacket` ile çalışır; exe **Yönetici olarak çalıştırılmalı** (paket enjeksiyonu için). Npcap yoksa motor güvenli biçimde devre dışı kalır ve GUI "MOTOR YOK" gösterir.
 - Stealth tarama türleri (SYN/FIN/NULL/Xmas/ACK/Window/Maimon) Windows'ta desteklenmez; seçildiğinde **TCP Connect** taramasına otomatik düşer ve arayüzde uyarı görürsünüz.
 - ARP taraması Windows'ta native ICMP ping sweep + `GetIpNetTable` ile çalışır; harici `ping`/`arp` komutlarına bağımlı değildir.
 
@@ -99,6 +101,7 @@ sudo ./build-linux/guvenlik_merkezi
 | `wpcap.dll bulunamadı` | Npcap runtime yok | npcap.com'dan Npcap installer'ı kurun (WinPcap API mode) |
 | Canlı trafik paneli boş / cihaz listesi yok | Yönetici yetkisi yok | Exe'yi sağ tık → "Yönetici olarak çalıştır" |
 | Ping sweep sonucu eksik | Hedef güvenlik duvarı ICMP'yi engelliyor | Hedefte ICMP echo'ya izin verin (davranışsal kısıt, hata değil) |
+| Ağdan Kesme panelinde "MOTOR YOK" / KES butonları pasif | Npcap runtime yok veya yönetici yetkisi yok | Npcap'i kurun (WinPcap API mode) ve exe'yi **Yönetici olarak çalıştırın** |
 
 ## 🧪 Testler
 
@@ -118,7 +121,7 @@ gcc -std=c11 -D_GNU_SOURCE -Iinclude tests/filter_engine_test.c src/filter_engin
 │   ├── gui.c               # Raylib/raygui arayüzü
 │   ├── platform.c/h        # Platform soyutlaması (thread, iface, GUID, shims)
 │   ├── arp_scanner.c       # Ağ keşfi (raw ARP / ICMP+GetIpNetTable)
-│   ├── arp_block.c         # Ağdan Kesme (ARP black-hole) motoru (Linux raw / Windows stub)
+│   ├── arp_block.c         # Ağdan Kesme (ARP black-hole) motoru (Linux raw AF_PACKET / Windows Npcap)
 │   ├── port_scanner.c      # Port tarama motoru
 │   ├── network_monitor.c   # libpcap/Npcap canlı yakalama
 │   ├── network_ids.c       # IDS kuralları ve alert motoru

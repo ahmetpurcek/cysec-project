@@ -1,4 +1,4 @@
 # Derleme ciktilari (platforma gore ayri klasorler)
 build-linux/
 build-win/
-
+build/
