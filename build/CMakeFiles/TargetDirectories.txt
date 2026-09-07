@@ -1,0 +1,3 @@
+/home/robot/cysec-project/build/CMakeFiles/guvenlik_merkezi.dir
+/home/robot/cysec-project/build/CMakeFiles/edit_cache.dir
+/home/robot/cysec-project/build/CMakeFiles/rebuild_cache.dir
