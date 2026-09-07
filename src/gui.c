@@ -13,6 +13,7 @@
 #include "filter_engine.h"
 #include "network_monitor.h"
 #include "network_ids.h"
+#include "arp_block.h"
 #include "platform.h"
 #include "port_scanner.h"
 #include "raylib.h"
@@ -51,6 +52,8 @@ static char g_capture_iface[MAX_IFACE_LEN] = {0}; /* izlemenin actigi arayuz (fa
 static IdsGuiAlert g_ids_alerts_snapshot[IDS_MAX_GUI_ALERTS];
 static int g_ids_alert_count = 0;
 static float g_scroll_nm_devices = 0;    /* network monitor cihaz listesi scroll */
+static ArpBlockSnapshot g_arp_block;     /* Agdan Kesme (ARP) engel listesi */
+static float g_scroll_blk = 0;           /* engellenen cihazlar listesi scroll */
 static char g_nm_target[MAX_IP_LEN] = {0}; /* network monitor secili hedef */
 static int g_nm_prev_packet_count = 0;  /* auto-scroll icin onceki paket sayisi */
 static int g_nm_auto_scroll = 1;        /* 1=en altta, otomatik kaydir */
@@ -336,6 +339,9 @@ static void draw_stat_card(Rectangle r, const char *label, const char *value,
 
 
 /* ========== Dashboard Paneli ========== */
+/* Engellenen cihaz listesini motor snapshot'u ile tazele */
+static void blocklist_refresh(void) { arp_block_get_snapshot(&g_arp_block); }
+
 static void draw_panel_dashboard(int W, int H) {
   int y0 = 86;
   char buf[64], sub[128];
@@ -389,13 +395,26 @@ static void draw_panel_dashboard(int W, int H) {
                g_scan.is_scanning ? COLOR_AMBER : COLOR_GREEN);
   }
 
+  /* Alt: Engellenen cihazlar (Agdan Kesme / ARP black-hole) paneli —
+   * cihaz listesinin altindan yer ayirir; panel buyudukce liste kuculur. */
+  int blk_eng = arp_block_engine_ok();
+  int blk_n = g_arp_block.count;
+  int blk_h = 32 + blk_n * 22;
+  if (blk_h < 54) blk_h = 54;      /* baslik + en az bir bilgi satiri */
+  if (blk_h > 140) blk_h = 140;    /* fazlasi ic kaydirma ile erisilir */
+  int blk_top = list_y + list_h - 6 - blk_h;
+  int blk_x = 16;
+  int blk_w = list_w - 24;
+  int dev_h = (blk_top - 6) - (list_y + 40);   /* cihaz listesi yuksekligi */
+  if (dev_h < 30) dev_h = 30;
+
   int item_h = 40;
-  int visible_items = (list_h - 44) / item_h;
+  int visible_items = (dev_h - 6) / item_h;
   float max_scroll = (g_scan.device_count - visible_items) * item_h;
   if (max_scroll < 0)
     max_scroll = 0;
 
-  Rectangle list_area = {12, list_y + 40, list_w, list_h - 44};
+  Rectangle list_area = {12, list_y + 40, list_w, dev_h};
   if (CheckCollisionPointRec(GetMousePosition(), list_area)) {
     g_scroll_devices -= GetMouseWheelMove() * 30;
     if (g_scroll_devices < 0)
@@ -404,48 +423,71 @@ static void draw_panel_dashboard(int W, int H) {
       g_scroll_devices = max_scroll;
   }
 
-  BeginScissorModeScaled(12, list_y + 40, list_w, list_h - 44);
+  BeginScissorModeScaled(12, list_y + 40, list_w, dev_h);
   for (int i = 0; i < g_scan.device_count; i++) {
     int iy = list_y + 42 + i * item_h - (int)g_scroll_devices;
-    if (iy + item_h < list_y + 40 || iy > list_y + list_h)
+    if (iy + item_h < list_y + 40 || iy > list_y + 40 + dev_h)
       continue;
 
     Device *d = &g_scan.devices[i];
     Rectangle item_r = {16, iy, list_w - 24, item_h - 3};
     int is_sel = (strcmp(d->ip, g_selected_device_ip) == 0);
     int hover = CheckCollisionPointRec(GetMousePosition(), item_r);
+    int is_gw = (strcmp(d->ip, g_scan.gateway_ip) == 0);
+    int is_local = (strcmp(d->ip, g_scan.local_ip) == 0);
+    int is_blk = arp_block_is_blocked(d->ip);
+    Color tagc = is_gw ? COLOR_AMBER : (is_local ? COLOR_GREEN : COLOR_TEXT_DIM);
+    const char *tag =
+        is_gw ? "AG GECIDI" : (is_local ? "BU CIHAZ" : "CIHAZ");
 
+    /* Zemin: secili / hover / engelli (kirmizi ton) */
     Color bg = is_sel ? COLOR_SELECTED
                       : (hover ? COLOR_PANEL_HOVER : (Color){0, 0, 0, 0});
-    if (is_sel || hover)
+    if (is_blk)
+      bg = ui_mix(bg, COLOR_RED, 0.10f);
+    if (is_sel || hover || is_blk)
       DrawRectangleRounded(item_r, 0.12f, 6, bg);
     if (is_sel)
       DrawRectangle(item_r.x, item_r.y + 6, 3, item_r.height - 12,
                     COLOR_ACCENT);
 
-    /* Tip tespiti */
-    int is_gw = (strcmp(d->ip, g_scan.gateway_ip) == 0);
-    int is_local = (strcmp(d->ip, g_scan.local_ip) == 0);
-    Color tagc = is_gw ? COLOR_AMBER : (is_local ? COLOR_GREEN : COLOR_TEXT_DIM);
-    const char *tag =
-        is_gw ? "AG GECIDI" : (is_local ? "BU CIHAZ" : "CIHAZ");
-
-    DrawTextC(d->ip, item_r.x + 14, iy + 5, 12,
-              is_sel ? COLOR_TEXT : COLOR_TEXT);
+    DrawTextC(d->ip, item_r.x + 14, iy + 5, 12, COLOR_TEXT);
     if (is_sel)
       DrawTextC(d->ip, item_r.x + 15, iy + 6, 12, COLOR_ACCENT);
-
-    /* MAC + tip etiketi alt satirda */
+    if (is_blk)
+      DrawTextC(d->ip, item_r.x + 14, iy + 5, 12, COLOR_RED);
     DrawTextC(d->mac, item_r.x + 14, iy + 21, 8, COLOR_TEXT_DIM);
 
+    /* Hizli engelle/geri al butonu sagda; rozet hemen soluna kayar */
+    int btn_x = item_r.x + item_r.width - 44;
     int tagw = MeasureText(tag, 7) + 10;
     DrawRectangleRounded(
-        (Rectangle){item_r.x + item_r.width - tagw - 6, iy + 6, tagw, 12},
-        0.5f, 4, ui_alpha(tagc, 18));
-    DrawTextC(tag, item_r.x + item_r.width - tagw, iy + 8, 7, tagc);
+        (Rectangle){btn_x - tagw - 6, iy + 6, tagw, 12}, 0.5f, 4,
+        ui_alpha(tagc, 18));
+    DrawTextC(tag, btn_x - tagw, iy + 8, 7, tagc);
 
-    if (is_local) {
-      draw_led(item_r.x + item_r.width - 16, iy + 25, 2.5f, COLOR_GREEN, 0);
+    int can_toggle = blk_eng && !is_gw && !is_local;
+    Rectangle tbtn = {btn_x, iy + 8, 36, 22};
+    int bhov = CheckCollisionPointRec(GetMousePosition(), tbtn);
+    if (can_toggle) {
+      Color bcol = is_blk ? COLOR_GREEN : COLOR_RED;
+      DrawRectangleRounded(tbtn, 0.3f, 6, ui_alpha(bcol, bhov ? 100 : 55));
+      DrawRectangleRoundedLinesEx(tbtn, 0.3f, 6, 1.0f, ui_alpha(bcol, 190));
+      DrawTextC(is_blk ? "AC" : "KES",
+                tbtn.x + (36 - MeasureText(is_blk ? "AC" : "KES", 8)) / 2,
+                iy + 15, 8, COLOR_TEXT);
+      if (bhov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        /* KES/AC — satir secimini tetikleme */
+        arp_block_set(d->ip, d->mac, is_blk ? 0 : 1);
+        arp_block_get_snapshot(&g_arp_block);
+        continue;
+      }
+    } else {
+      /* Ag gecidi / bu cihaz engellenemez: pasif buton */
+      DrawRectangleRounded(tbtn, 0.3f, 6, (Color){255, 255, 255, 10});
+      DrawTextC(is_blk ? "AC" : "KES",
+                tbtn.x + (36 - MeasureText(is_blk ? "AC" : "KES", 8)) / 2,
+                iy + 15, 8, ui_alpha(COLOR_TEXT_DIM, 120));
     }
 
     if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
@@ -471,8 +513,82 @@ static void draw_panel_dashboard(int W, int H) {
   }
   EndScissorMode();
 
-  draw_custom_scrollbar(12 + list_w - 10, list_y + 40, 10, list_h - 44,
+  draw_custom_scrollbar(12 + list_w - 10, list_y + 40, 10, dev_h,
                         g_scan.device_count * item_h, &g_scroll_devices);
+
+  /* --- Engellenen cihazlar paneli --- */
+  {
+    Color blk_border = blk_n > 0 ? ui_alpha(COLOR_RED, 130)
+                                 : ui_alpha(COLOR_BORDER, 120);
+    DrawRoundedPanel((Rectangle){blk_x, blk_top, blk_w, blk_h},
+                     COLOR_SURFACE, blk_border);
+
+    DrawTextC("ENGELLENEN CIHAZLAR", blk_x + 10, blk_top + 8, 9,
+              blk_n > 0 ? COLOR_RED : COLOR_ACCENT);
+    const char *mst = blk_eng ? "MOTOR AKTIF" : "MOTOR YOK";
+    Color msc = blk_eng ? COLOR_GREEN : COLOR_RED;
+    draw_led(blk_x + blk_w - 20, blk_top + 13, 2.0f, msc, 0);
+    DrawTextC(mst, blk_x + blk_w - 20 - MeasureText(mst, 7) - 8, blk_top + 9,
+              7, msc);
+    DrawRectangle(blk_x + 6, blk_top + 24, blk_w - 12, 1,
+                  ui_alpha(COLOR_BORDER, 110));
+
+    int blist_top = blk_top + 30;
+    int blist_h = blk_h - 32;
+
+    if (blk_n == 0) {
+      DrawTextC(blk_eng
+                    ? "Engel yok. Cihaz satirindaki 'KES' ile agdan kesin."
+                    : "ARP motoru kapali (root/cap_net_raw gerekli).",
+                blk_x + 10, blist_top, 8,
+                blk_eng ? COLOR_TEXT_DIM : ui_alpha(COLOR_RED, 170));
+    } else {
+      float max_blk = blk_n * 22 - (blist_h - 2);
+      if (max_blk < 0) max_blk = 0;
+      if (g_scroll_blk > max_blk)
+        g_scroll_blk = max_blk;
+      Rectangle blk_area = {blk_x, blist_top, blk_w - 8, blist_h};
+      if (CheckCollisionPointRec(GetMousePosition(), blk_area)) {
+        g_scroll_blk -= GetMouseWheelMove() * 30;
+        if (g_scroll_blk < 0)
+          g_scroll_blk = 0;
+        if (g_scroll_blk > max_blk)
+          g_scroll_blk = max_blk;
+      }
+      BeginScissorModeScaled(blk_x, blist_top, blk_w, blist_h);
+      for (int i = 0; i < blk_n; i++) {
+        ArpBlockEntry *be = &g_arp_block.entries[i];
+        int by = blist_top + i * 22 - (int)g_scroll_blk;
+        if (by + 22 < blist_top || by > blist_top + blist_h)
+          continue;
+        Rectangle brow = {blk_x + 6, by, blk_w - 22, 20};
+        int bhov = CheckCollisionPointRec(GetMousePosition(), brow);
+        if (bhov)
+          DrawRectangleRounded(brow, 0.1f, 4, ui_alpha(COLOR_RED, 20));
+        DrawTextC(be->ip, brow.x + 6, by + 2, 9, COLOR_RED);
+        char bl2[96];
+        snprintf(bl2, sizeof(bl2), "%s  |  %s",
+                 be->mac[0] ? be->mac : "--:--:--:--:--:--",
+                 be->blocked_at[0] ? be->blocked_at : "--:--:--");
+        DrawTextC(bl2, brow.x + 6, by + 13, 7, COLOR_TEXT_DIM);
+        Rectangle rbtn = {brow.x + brow.width - 64, by + 2, 60, 18};
+        int rhov = CheckCollisionPointRec(GetMousePosition(), rbtn);
+        DrawRectangleRounded(rbtn, 0.25f, 4,
+                             ui_alpha(COLOR_GREEN, rhov ? 100 : 50));
+        DrawRectangleRoundedLinesEx(rbtn, 0.25f, 4, 1.0f,
+                                    ui_alpha(COLOR_GREEN, 160));
+        DrawTextC("GERI AL", rbtn.x + (60 - MeasureText("GERI AL", 8)) / 2,
+                  by + 5, 8, COLOR_TEXT);
+        if (rhov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+          arp_block_set(be->ip, be->mac, 0);
+          arp_block_get_snapshot(&g_arp_block);
+        }
+      }
+      EndScissorMode();
+      draw_custom_scrollbar(blk_x + blk_w - 10, blist_top, 10, blist_h,
+                            blk_n * 22, &g_scroll_blk);
+    }
+  }
 
   /* Sag panel */
   int rx = 12 + list_w + 8;
@@ -709,6 +825,47 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
     }
     DrawTextC("Paket yakalama ve analiz aracina gecirir", rx + 16, cy + 31, 8,
               COLOR_TEXT_DIM);
+
+    cy += 47;
+
+    /* --- Agdan Kes (ARP black-hole) --- */
+    DrawRectangle(rx + 10, cy, rw - 20, 1, ui_alpha(COLOR_BORDER, 120));
+    cy += 12;
+    DrawTextC("AGDAN KESME", rx + 16, cy, 9, COLOR_TEXT_DIM);
+    cy += 20;
+
+    int blk_act = arp_block_is_blocked(dev->ip);
+    int blk_off = !g_arp_block.engine_ok || is_gw || is_local;
+    Rectangle abtn = {rx + 16, cy, 200, 26};
+    const char *alab = blk_act ? "Agi Geri Ver" : "Agdan Kes";
+    if (!blk_off) {
+      int abhov = CheckCollisionPointRec(GetMousePosition(), abtn);
+      Color abcol = blk_act ? COLOR_GREEN : COLOR_RED;
+      DrawRectangleRounded(abtn, 0.3f, 6, ui_alpha(abcol, abhov ? 100 : 55));
+      DrawRectangleRoundedLinesEx(abtn, 0.3f, 6, 1.0f, ui_alpha(abcol, 200));
+      DrawTextC(alab, rx + 16 + (200 - MeasureText(alab, 10)) / 2, cy + 8, 10,
+                COLOR_TEXT);
+      if (abhov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        arp_block_set(dev->ip, dev->mac, blk_act ? 0 : 1);
+        arp_block_get_snapshot(&g_arp_block);
+      }
+    } else {
+      DrawRectangleRounded(abtn, 0.3f, 6, (Color){255, 255, 255, 10});
+      DrawRectangleRoundedLinesEx(abtn, 0.3f, 6, 1.0f,
+                                  ui_alpha(COLOR_TEXT_DIM, 60));
+      DrawTextC(alab, rx + 16 + (200 - MeasureText(alab, 10)) / 2, cy + 8, 10,
+                ui_alpha(COLOR_TEXT_DIM, 130));
+    }
+    const char *ahint;
+    if (is_gw || is_local)
+      ahint = "Ag gecidi ve bu cihaz engellenemez.";
+    else if (!g_arp_block.engine_ok)
+      ahint = "ARP motoru kapali (root/cap_net_raw gerekli).";
+    else if (blk_act)
+      ahint = "Cihaz agdan kesildi. Geri vermek icin butona basin.";
+    else
+      ahint = "Cihazin ag erisimini aninda keser (ARP black-hole).";
+    DrawTextC(ahint, rx + 16, cy + 31, 8, COLOR_TEXT_DIM);
   } else {
     DrawTextC("Cihaz bilgisi bulunamadi.", rx + 16, cy, 11, COLOR_TEXT_DIM);
   }
@@ -1962,6 +2119,9 @@ void gui_draw(void) {
 
     ids_set_mac_context(g_scan.local_mac, g_scan.gateway_mac,
                         g_scan.gateway_ip, g_scan.local_ip);
+    arp_block_set_context(g_scan.local_iface, g_scan.local_mac,
+                          g_scan.gateway_ip, g_scan.gateway_mac);
+    blocklist_refresh();
     g_ids_alert_count =
         ids_get_alerts_snapshot(g_ids_alerts_snapshot, IDS_MAX_GUI_ALERTS);
     if (g_capture_all) {

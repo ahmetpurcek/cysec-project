@@ -12,6 +12,7 @@ set(SOURCES
     src/arp_scanner.c
     src/network_monitor.c
     src/network_ids.c
+    src/arp_block.c
     src/port_scanner.c
     src/gui.c
     src/filter_engine.c

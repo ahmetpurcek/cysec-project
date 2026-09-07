@@ -8,6 +8,11 @@ Raylib tabanlı, tek pencereden ağ keşfi, port taraması, canlı trafik izleme
 - **Ağ Keşfi (ARP Scanner)** — Ağdaki cihazları tarar ve sınıflandırır.
   - Linux: raw ARP soketleri ile sweep
   - Windows: native ICMP ping sweep (IcmpSendEcho) + `GetIpNetTable` ile ARP tablosu okuma
+- **Ağdan Kesme (ARP Black-Hole)** — Seçilen cihazın ağ erişimini anında keser/geri verir.
+  - Linux: raw AF_PACKET soketleri ile hedefe sürekli sahte ARP yanıtı göndererek (black-hole) cihazın trafiğini kara deliğe yönlendirir.
+  - Windows: özellik şu anda stub'dır; motor `engine_ok = 0` döner, GUI güvenli biçimde "MOTOR YOK" gösterir ve butonları pasifleştirir.
+  - Cihaz listesi satırlarındaki hızlı **KES/AC** düğmeleri, cihaz detayındaki **Ağdan Kes/Geri Ver** butonu ve sol alttaki **ENGELLENEN CİHAZLAR** paneli (Geri Al) üzerinden kullanılır.
+  - Ağ geçidi (gateway) ve yerel cihaz (bu cihaz) ipuçları motor tarafından engellenemez.
 - **Otonom Port Tarayıcı (AutoPort)** — Nmap bağımsız, çok kanallı (thread pool) port/servis analizi; TTL tabanlı OS tahmini.
   - Tüm platformlar: TCP Connect taraması
   - Yalnızca Linux (root): SYN, FIN, NULL, Xmas, ACK, Window, Maimon raw taramaları
@@ -113,6 +118,7 @@ gcc -std=c11 -D_GNU_SOURCE -Iinclude tests/filter_engine_test.c src/filter_engin
 │   ├── gui.c               # Raylib/raygui arayüzü
 │   ├── platform.c/h        # Platform soyutlaması (thread, iface, GUID, shims)
 │   ├── arp_scanner.c       # Ağ keşfi (raw ARP / ICMP+GetIpNetTable)
+│   ├── arp_block.c         # Ağdan Kesme (ARP black-hole) motoru (Linux raw / Windows stub)
 │   ├── port_scanner.c      # Port tarama motoru
 │   ├── network_monitor.c   # libpcap/Npcap canlı yakalama
 │   ├── network_ids.c       # IDS kuralları ve alert motoru
@@ -120,6 +126,7 @@ gcc -std=c11 -D_GNU_SOURCE -Iinclude tests/filter_engine_test.c src/filter_engin
 │   └── utils.c             # Yardımcılar (hashmap, str, log)
 └── tests/                  # Birim/regresyon testleri
 ```
+
 
 
 

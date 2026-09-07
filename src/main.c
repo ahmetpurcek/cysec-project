@@ -7,6 +7,7 @@
 #include "arp_scanner.h"
 #include "network_monitor.h"
 #include "network_ids.h"
+#include "arp_block.h"
 #include "port_scanner.h"
 #include "gui.h"
 #include <stdio.h>
@@ -26,6 +27,7 @@ int main(int argc, char *argv[]) {
     scanner_init();
     full_monitor_init();
     ids_init();
+    arp_block_init();
     portscan_init();
 
     /* Otonom ağ taramasını başlat */
@@ -42,6 +44,7 @@ int main(int argc, char *argv[]) {
     /* Temizlik */
     gui_cleanup();
     arp_spoof_stop();
+    arp_block_cleanup();
     portscan_cleanup();
     full_monitor_cleanup();
     ids_cleanup();
