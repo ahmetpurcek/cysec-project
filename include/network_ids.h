@@ -56,6 +56,7 @@ typedef struct {
     char        description[128];
     int         status;         /* IDS_ALERT_STATUS_* (SOC v3 triyaj) */
     char        note[256];      /* analist notu (SOC v3 triyaj) */
+    int         port_owner_attacker; /* port sahibi saldirgandir (Meterpreter vb.) */
 } IdsGuiAlert;
 
 /* SOC v3 triyaj durumlari */
@@ -118,6 +119,9 @@ void ids_process_packet(const PacketRecord *pkt);
 /* GUI snapshot: son IDS_MAX_GUI_ALERTS uyarıyı düz diziye kopyalar */
 int  ids_get_alerts_snapshot(IdsGuiAlert *out, int max_count);
 void ids_clear_alerts(void);
+
+/* Tek bir uyariyi dizinden sil (GUI satir bazli silme; 1=basarili) */
+int  ids_remove_alert(int index);
 
 /* MAC/IP bağlamı: ARP zehirlenmesi tespiti ve self-origin uyari
  * bastirmasi icin gateway/kendi MAC ve yerel IP bilgisi */

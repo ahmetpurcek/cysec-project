@@ -589,6 +589,97 @@ int main(void) {
               sn.total_flows);
     }
 
+    printf("== ids_remove_alert (satir bazli silme) ==\n");
+    {
+        ids_clear_alerts();
+        /* 3 farkli hosttan deterministik uyari uret:
+         * DGA(.14), DGA(.16), Tunel(.15) */
+        for (int i = 0; i < 30; i++) {
+            char q[64];
+            snprintf(q, sizeof(q), "dga%02d.example.com", i);
+            PacketRecord p = pkt_dns(ip4("192.168.1.14"), ip4("192.168.1.1"),
+                                     40000 + i, 53, q, 0, 0);
+            ids_process_packet(&p);
+            PacketRecord p2 = pkt_dns(ip4("192.168.1.16"), ip4("192.168.1.1"),
+                                      41000 + i, 53, q, 0, 0);
+            ids_process_packet(&p2);
+        }
+        PacketRecord t = pkt_dns(ip4("192.168.1.15"), ip4("192.168.1.1"),
+                                 42000, 53, "aabbccddeeff0011.example.com",
+                                 0, 0);
+        ids_process_packet(&t);
+        tick_analysis();
+
+        IdsGuiAlert before[8];
+        int nb = ids_get_alerts_snapshot(before, 8);
+        CHECK(nb >= 3, "remove testi: en az 3 uyari gerekli, %d", nb);
+
+        /* Ortadaki kaydi (indeks 1) sil: sonraki kayitlar sola kaymali */
+        CHECK(ids_remove_alert(1) == 1, "orta kayit silinemedi");
+        IdsGuiAlert after[8];
+        int na = ids_get_alerts_snapshot(after, 8);
+        CHECK(na == nb - 1, "silme sonrasi sayi %d, beklenen %d", na, nb - 1);
+        if (na >= 1)
+            CHECK(strcmp(after[0].sig_name, before[0].sig_name) == 0,
+                  "ilk kayit degismemeli: %s vs %s",
+                  after[0].sig_name, before[0].sig_name);
+        if (na >= 2)
+            CHECK(strcmp(after[1].sig_name, before[2].sig_name) == 0,
+                  "kaydirma bozuk: %s vs %s",
+                  after[1].sig_name, before[2].sig_name);
+
+        /* Gecersiz indeksler reddedilmeli */
+        CHECK(ids_remove_alert(-1) == 0, "negatif indeks kabul edildi!");
+        CHECK(ids_remove_alert(na) == 0, "sinir disi indeks kabul edildi!");
+        CHECK(ids_remove_alert(9999) == 0, "cok buyuk indeks kabul edildi!");
+
+        /* Sondan teker teker sil: bos dizide silme reddedilmeli */
+        while (na > 0) {
+            CHECK(ids_remove_alert(na - 1) == 1,
+                  "sondan silme basarisiz (%d)", na);
+            na = ids_get_alerts_snapshot(after, 8);
+        }
+        CHECK(na == 0, "tum kayitlar silinmeli, %d", na);
+        CHECK(ids_remove_alert(0) == 0, "bos diziden silme kabul edildi!");
+    }
+
+    printf("== kotu amacli port: yon bayragi (port sahibi saldirgan) ==\n");
+    {
+        /* Meterpreter dinleyicisi: 192.168.1.15:4444'e 23 baglaniyor.
+         * Port sahibi (dst) saldirgandir -> GUI onu once gosterir. */
+        PacketRecord m = pkt_tcp(ip4("192.168.1.23"), ip4("192.168.1.15"),
+                                 52000, 4444, 1);
+        /* Yabanci MAC: yerel trafik bastirmasini atla (kural motoru calissin) */
+        m.raw_data[6] = 0xDE; m.raw_data[7] = 0xAD;
+        m.raw_data[8] = 0xBE; m.raw_data[9] = 0xEF;
+        m.raw_data[10] = 0x00; m.raw_data[11] = 0x01;
+        ids_process_packet(&m);
+
+        IdsGuiAlert snaps[4];
+        int n = ids_get_alerts_snapshot(snaps, 4);
+        CHECK(n == 1, "Meterpreter uyarisi sayisi 1, %d", n);
+        if (n >= 1) {
+            IdsGuiAlert *a = &snaps[n - 1];
+            CHECK(strstr(a->sig_name, "Meterpreter") != NULL,
+                  "imza: %s", a->sig_name);
+            CHECK(a->src_port == 52000 && a->dst_port == 4444,
+                  "portlar src=%u dst=%u", a->src_port, a->dst_port);
+            CHECK(strcmp(a->src_ip, "192.168.1.23") == 0,
+                  "src_ip: %s", a->src_ip);
+            CHECK(strcmp(a->dst_ip, "192.168.1.15") == 0,
+                  "dst_ip: %s", a->dst_ip);
+            CHECK(a->port_owner_attacker == 1,
+                  "port_owner_attacker bayragi set edilmedi");
+        }
+        /* Cooldown: ayni akis 60 sn icinde bir daha uyari uretmemeli */
+        uint64_t before = g_ids.total_alerts;
+        ids_process_packet(&m);
+        CHECK(g_ids.total_alerts == before,
+              "cooldown calismadi: %llu -> %llu",
+              (unsigned long long)before,
+              (unsigned long long)g_ids.total_alerts);
+    }
+
     ids_cleanup();
 
     printf("\n%d test, %d basarisiz\n", g_total, g_failed);

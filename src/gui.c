@@ -989,7 +989,7 @@ static void draw_panel_security(int W, int H) {
     return;
   }
 
-  int item_h = 64;
+  int item_h = 74;
   Rectangle area = {12, py + 30, W - 24, H - py - 42};
   if (CheckCollisionPointRec(GetMousePosition(), area)) {
     g_scroll_alerts -= GetMouseWheelMove() * 40;
@@ -1000,13 +1000,15 @@ static void draw_panel_security(int W, int H) {
   }
 
   BeginScissorModeScaled(area.x, area.y, area.width, area.height);
+  int removed_idx = -1;
   for (int i = g_ids_alert_count - 1; i >= 0; i--) {
     int draw_idx = g_ids_alert_count - 1 - i;
     int iy = area.y + draw_idx * item_h - (int)g_scroll_alerts;
     if (iy + item_h < area.y || iy > area.y + area.height) continue;
 
     IdsGuiAlert *al = &g_ids_alerts_snapshot[i];
-    Rectangle ir = {area.x + 4, iy, area.width - 8, item_h - 3};
+    /* Scrollbar icin sagdan 32px bosluk: satirlar ezilmiyor */
+    Rectangle ir = {area.x + 4, iy, area.width - 32, item_h - 4};
 
     /* Arka plan rengi severity'ye gore */
     Color sc = severity_color(al->severity);
@@ -1026,42 +1028,80 @@ static void draw_panel_security(int W, int H) {
 
     /* Severity badge */
     int slw = MeasureText(al->severity, 8) + 12;
-    DrawRectangleRounded((Rectangle){ir.x + 10, ir.y + 5, slw, 14}, 0.5f, 4,
+    DrawRectangleRounded((Rectangle){ir.x + 10, ir.y + 6, slw, 14}, 0.5f, 4,
                          ui_alpha(sc, 40));
     DrawRectangleRoundedLinesEx(
-        (Rectangle){ir.x + 10, ir.y + 5, slw, 14}, 0.5f, 4, 1.0f,
+        (Rectangle){ir.x + 10, ir.y + 6, slw, 14}, 0.5f, 4, 1.0f,
         ui_alpha(sc, 120));
-    DrawTextC(al->severity, ir.x + 16, ir.y + 7, 8, sc);
+    DrawTextC(al->severity, ir.x + 16, ir.y + 8, 8, sc);
 
     /* Skor badge */
     snprintf(buf, sizeof(buf), "%.0f%% guven skoru", al->score * 100);
     int skw = MeasureText(buf, 8) + 10;
     DrawRectangleRounded(
-        (Rectangle){ir.x + 12 + slw + 6, ir.y + 5, skw, 14}, 0.5f, 4,
+        (Rectangle){ir.x + 12 + slw + 6, ir.y + 6, skw, 14}, 0.5f, 4,
         ui_alpha(sc, 18));
-    DrawTextC(buf, ir.x + 17 + slw + 6, ir.y + 7, 8,
+    DrawTextC(buf, ir.x + 17 + slw + 6, ir.y + 8, 8,
               ui_mix(sc, COLOR_TEXT, 0.25f));
 
-    /* Imza adi */
-    DrawTextC(al->sig_name, ir.x + 14, ir.y + 24, 11, COLOR_TEXT);
+    /* Zaman (skor badge'in hemen saginda) */
+    DrawTextC(al->timestamp, ir.x + 12 + slw + 6 + skw + 8, ir.y + 9, 8,
+              COLOR_TEXT_SEC);
 
-    /* Kaynak -> Hedef */
-    snprintf(buf, sizeof(buf), "%s:%d  >  %s:%d",
-             al->src_ip, al->src_port, al->dst_ip, al->dst_port);
-    DrawTextC(buf, ir.x + 14, ir.y + 39, 9, COLOR_TEXT_SEC);
+    /* Imza adi */
+    DrawTextC(al->sig_name, ir.x + 14, ir.y + 25, 12, COLOR_TEXT);
+
+    /* Yon: port-tetiklemeli kurallarda (Meterpreter vb.) port sahibi
+       saldirgandir; motor port_owner_attacker ile isaretler. */
+    int ly = ir.y + 43;
+    const char *a_ip = al->port_owner_attacker ? al->dst_ip : al->src_ip;
+    uint16_t a_port = al->port_owner_attacker ? al->dst_port : al->src_port;
+    snprintf(buf, sizeof(buf), "%s:%d", a_ip, a_port);
+    DrawTextC(buf, ir.x + 14, ly, 9, COLOR_TEXT);
+    int ax = ir.x + 14 + MeasureText(buf, 9) + 8;
+    DrawTextC("->", ax, ly, 9, COLOR_TEXT_DIM);
+    int hx = ax + MeasureText("->", 9) + 8;
+    const char *v_ip = al->port_owner_attacker ? al->src_ip : al->dst_ip;
+    uint16_t v_port = al->port_owner_attacker ? al->src_port : al->dst_port;
+    snprintf(buf, sizeof(buf), "%s:%d", v_ip, v_port);
+    DrawTextC(buf, hx, ly, 9, COLOR_TEXT_DIM);
 
     /* Aciklama (kisaltilmis) */
     char dshort[100];
     strncpy(dshort, al->description, 99);
     dshort[99] = '\0';
-    DrawTextC(dshort, ir.x + 14, ir.y + 52, 8, COLOR_TEXT_DIM);
+    DrawTextC(dshort, ir.x + 14, ir.y + 57, 8, COLOR_TEXT_DIM);
 
-    /* Zaman (sag ust) */
-    int tw = MeasureText(al->timestamp, 9);
-    DrawTextC(al->timestamp, ir.x + ir.width - tw - 10, ir.y + 8, 9,
-              COLOR_TEXT_DIM);
+    /* Satir bazli silme (X) butonu */
+    Rectangle del_btn = {ir.x + ir.width - 20, ir.y + 26, 18, 18};
+    int del_hover = CheckCollisionPointRec(GetMousePosition(), del_btn);
+    DrawRectangleRounded(del_btn, 0.3f, 4,
+                         del_hover ? ui_alpha(COLOR_RED, 70)
+                                   : ui_alpha(COLOR_RED, 16));
+    DrawRectangleRoundedLinesEx(del_btn, 0.3f, 4, 1.0f,
+                                del_hover ? ui_alpha(COLOR_RED, 220)
+                                          : ui_alpha(COLOR_RED, 50));
+    Color xc = del_hover ? COLOR_RED : ui_mix(COLOR_RED, COLOR_TEXT, 0.35f);
+    DrawLine((int)del_btn.x + 5, (int)del_btn.y + 5, (int)del_btn.x + 13,
+             (int)del_btn.y + 13, xc);
+    DrawLine((int)del_btn.x + 13, (int)del_btn.y + 5, (int)del_btn.x + 5,
+             (int)del_btn.y + 13, xc);
+    if (del_hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+      removed_idx = i;
+      break;
+    }
   }
   EndScissorMode();
+
+  /* Tek silme sonrasi snapshot'i yenile ve scroll'u sinirla */
+  if (removed_idx >= 0) {
+    ids_remove_alert(removed_idx);
+    g_ids_alert_count =
+        ids_get_alerts_snapshot(g_ids_alerts_snapshot, IDS_MAX_GUI_ALERTS);
+    float mx = (g_ids_alert_count * item_h) - area.height;
+    if (mx < 0) mx = 0;
+    if (g_scroll_alerts > mx) g_scroll_alerts = mx;
+  }
 
   draw_custom_scrollbar(area.x + area.width - 10, area.y, 10, area.height,
                         g_ids_alert_count * item_h, &g_scroll_alerts);

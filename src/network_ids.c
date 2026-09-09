@@ -379,9 +379,9 @@ static uint32_t ids_sig_flags(const char *sig);
 static void ids_host_credit(uint32_t ip, uint32_t points, uint32_t flag);
 static void ids_host_victim(uint32_t ip, uint32_t points, uint32_t flag);
 
-static void ids_raise_alert(const char *sig, const char *sev, double score,
+static int ids_raise_alert(const char *sig, const char *sev, double score,
                             const IdsPktInfo *pi, const char *desc) {
-    if (!g_ids.running) return;
+    if (!g_ids.running) return -1;
     platform_mutex_lock(&g_ids_lock);
 
     IdsGuiAlert *a;
@@ -431,6 +431,7 @@ static void ids_raise_alert(const char *sig, const char *sev, double score,
     }
 
     platform_mutex_unlock(&g_ids_lock);
+    return g_alert_count - 1;
 }
 
 /* ==================================================================
@@ -1486,7 +1487,14 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                     snprintf(desc, sizeof(desc),
                              "Kotu amacli port %d (%s) baglantisi",
                              pi->dst_port, mal);
-                    ids_raise_alert(mal, "KRITIK", SCORE_KRITIK, pi, desc);
+                    int ai = ids_raise_alert(mal, "KRITIK", SCORE_KRITIK,
+                                             pi, desc);
+                    if (ai >= 0) {
+                        /* Port sahibi saldirgandir: GUI yon gostergesi */
+                        platform_mutex_lock(&g_ids_lock);
+                        g_alert_buf[ai].port_owner_attacker = 1;
+                        platform_mutex_unlock(&g_ids_lock);
+                    }
                 }
             }
         }
@@ -1813,6 +1821,24 @@ void ids_clear_alerts(void) {
     memset(g_alert_buf, 0, sizeof(g_alert_buf));
     g_alert_count = 0;
     platform_mutex_unlock(&g_ids_lock);
+}
+
+/* Tek bir uyariyi dizinden siler; sonraki kayitlari bir sola kaydirir.
+ * Dizini 0..g_alert_count-1 arasinda olmali (GUI snapshot indeksi). */
+int ids_remove_alert(int index) {
+    int ok = 0;
+    platform_mutex_lock(&g_ids_lock);
+    if (index >= 0 && index < g_alert_count) {
+        if (index + 1 < g_alert_count) {
+            memmove(&g_alert_buf[index], &g_alert_buf[index + 1],
+                    sizeof(IdsGuiAlert) * (g_alert_count - index - 1));
+        }
+        g_alert_count--;
+        memset(&g_alert_buf[g_alert_count], 0, sizeof(IdsGuiAlert));
+        ok = 1;
+    }
+    platform_mutex_unlock(&g_ids_lock);
+    return ok;
 }
 
 /* ---- SOC v3: kill chain asamasi (imza adindan) ---- */
