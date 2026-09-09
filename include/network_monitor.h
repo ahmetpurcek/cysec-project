@@ -7,7 +7,7 @@
 #include "platform.h"
 #include "arp_scanner.h"
 
-#define MAX_RAW_SIZE    256
+#define MAX_RAW_SIZE    512
 #define MAX_LAYERS      10
 
 
@@ -70,6 +70,7 @@ void full_monitor_init(void);
 void full_monitor_cleanup(void);
 void full_monitor_start(const char *iface);
 void full_monitor_stop(void);
+int  full_monitor_get_mode(void);  /* 0=kapalı, 1=procfs fallback, 2=pcap */
 void full_monitor_clear(void);
 int  full_monitor_get_packets(PacketRecord *out, int max_count, int offset);
 int  full_monitor_get_filtered(PacketRecord *out, int max_count, const char *filter_proto);
@@ -94,3 +95,4 @@ void enable_ip_forward(void);
 void disable_ip_forward(void);
 
 #endif /* NETWORK_MONITOR_H */
+

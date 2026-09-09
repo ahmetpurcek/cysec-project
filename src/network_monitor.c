@@ -60,6 +60,9 @@ static int initialized = 0;
 static int running = 0;
 static platform_mutex_t global_lock;
 
+/* Yakalama modu (GUI Tehdit Haritası göstergesi): 0=kapalı, 1=procfs, 2=pcap */
+static int g_capture_mode = 0;
+
 /* ---- CIRCULAR PACKET BUFFER (tüm paketler sırayla) ---- */
 #define PACKET_BUFFER_SIZE 10000
 static PacketRecord packet_buffer[PACKET_BUFFER_SIZE];
@@ -1652,6 +1655,7 @@ static void *monitor_thread(void *arg) {
         int dlt = pcap_datalink(handle);
         g_datalink_type = dlt;
         pcap_handle = handle;
+        g_capture_mode = 2;   /* pcap: tüm ağ trafiği görülebilir (root gerekli) */
         pcap_setnonblock(handle, 1, errbuf);
 
         fprintf(stderr, "[FULL_MONITOR] Capture started (datalink=%d)\n", dlt);
@@ -1666,6 +1670,7 @@ static void *monitor_thread(void *arg) {
     } else {
         /* ===== FALLBACK: pcap acilamadi ===== */
         fprintf(stderr, "[FULL_MONITOR] pcap failed: %s\n", errbuf);
+        g_capture_mode = 1;   /* procfs fallback: yalnızca yerel trafik */
 #ifdef PLATFORM_LINUX
         procnet_fallback_thread(NULL);
 #else
@@ -1696,6 +1701,12 @@ void full_monitor_stop(void) {
     if (pcap_handle) pcap_breakloop(pcap_handle);
 #endif
     platform_sleep_ms(150);  /* thread'in kapanması için kısa bekle */
+    g_capture_mode = 0;
+}
+
+/* Aktif yakalama modu: 0=kapalı, 1=procfs fallback, 2=pcap */
+int full_monitor_get_mode(void) {
+    return g_capture_mode;
 }
 
 void full_monitor_clear(void) {
