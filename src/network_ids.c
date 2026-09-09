@@ -671,10 +671,24 @@ static void ids_check_rules(const IdsPktInfo *pi) {
             }
         }
         if (mal) {
-            char desc[128];
-            snprintf(desc, sizeof(desc), "Kotu amacli port %d (%s) baglantisi",
-                     pi->dst_port, mal);
-            ids_raise_alert(mal, "KRITIK", SCORE_KRITIK, pi, desc);
+            /* Akis bazli tekrar bastirma: ayni kaynak->hedef->port akisi icin
+             * IDS_ALERT_COOLDOWN (60 sn) surece yalnizca TEK uyari uret.
+             * /proc/net fallback modu her 2 sn'de bir ayni SYN baglantisini
+             * yeniden sentezleyip IDS'e besledigi icin bu kural olmasaydi
+             * ayni uyaridan yuzlercesi aninda yigilirdi. */
+            snprintf(key, sizeof(key), "M|%u|%u|%u",
+                     pi->src_ip, pi->dst_ip, pi->dst_port);
+            t = ids_tracker_get(key);
+            if (t) {
+                ids_tracker_bump(t, 0);
+                if (ids_tracker_can_alert(t)) {
+                    char desc[128];
+                    snprintf(desc, sizeof(desc),
+                             "Kotu amacli port %d (%s) baglantisi",
+                             pi->dst_port, mal);
+                    ids_raise_alert(mal, "KRITIK", SCORE_KRITIK, pi, desc);
+                }
+            }
         }
     }
 
@@ -725,15 +739,20 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                      pi->dst_port);
             t = ids_tracker_get(key);
             if (t) {
-                ids_tracker_bump(t, 0);
-                if (t->count >= 8 && ids_tracker_can_alert(t)) {
-                    char desc[128];
+                /* Farkli kaynak portlari say: fallback modunun her 2 sn'de
+                 * ayni SYN baglantisini yeniden sentezlemesi tek bir kaynak
+                 * portu tekrar tekrar sayip yanlis "brute force" uyarisi
+                 * uretiyordu. Gercek brute force her baglanti denemesinde
+                 * yeni bir ephemeral kaynak port kullanir. */
+                ids_tracker_bump(t, pi->src_port);
+                if (t->count >= 8 && t->unique_len >= 5 && ids_tracker_can_alert(t)) {
+                    char desc[192];
                     char s[46], d[46];
                     ids_ip_to_str(pi->src_ip, s, sizeof(s));
                     ids_ip_to_str(pi->dst_ip, d, sizeof(d));
                     snprintf(desc, sizeof(desc),
-                             "%s -> %s:%u arasi %u baglanti denemesi",
-                             s, d, pi->dst_port, t->count);
+                             "%s -> %s:%u arasi %u farkli kaynak porttan %u baglanti denemesi",
+                             s, d, pi->dst_port, t->unique_len, t->count);
                     ids_raise_alert(brute_force_name(pi->dst_port),
                                     brute_force_sev(pi->dst_port),
                                     SCORE_KRITIK, pi, desc);
@@ -815,16 +834,21 @@ static void ids_check_rules(const IdsPktInfo *pi) {
 
     /* ---------- 4. UDP tarama / flood ---------- */
     if (pi->is_udp) {
-        snprintf(key, sizeof(key), "U|%u", pi->src_ip);
-        t = ids_tracker_get(key);
-        if (t) {
-            ids_tracker_bump(t, pi->dst_port);
-            if (t->count >= 15 && t->unique_len >= 8 && ids_tracker_can_alert(t))
-                ids_raise_alert("UDP Port Taramasi", "ORTA", SCORE_ORTA, pi,
-                                "Tek kaynaktan cok sayida farkli UDP portuna paket");
-            if (t->count >= 200 && t->unique_len >= 10 && ids_tracker_can_alert(t))
-                ids_raise_alert("UDP Flood", "ORTA", SCORE_ORTA, pi,
-                                "Tek kaynaktan asiri UDP trafigi");
+        /* DNS cevaplari (kaynak port 53 -> yuksek hedef port) tarama gibi
+         * gorunup yanlis pozitif uretiyordu; sayac yalnizca dusuk hedef
+         * porta giden ve DNS kaynagi olmayan paketlerle beslenir. */
+        if (pi->dst_port < 1024 && pi->src_port != 53) {
+            snprintf(key, sizeof(key), "U|%u", pi->src_ip);
+            t = ids_tracker_get(key);
+            if (t) {
+                ids_tracker_bump(t, pi->dst_port);
+                if (t->count >= 15 && t->unique_len >= 8 && ids_tracker_can_alert(t))
+                    ids_raise_alert("UDP Port Taramasi", "ORTA", SCORE_ORTA, pi,
+                                    "Tek kaynaktan cok sayida farkli UDP portuna paket");
+                if (t->count >= 200 && t->unique_len >= 10 && ids_tracker_can_alert(t))
+                    ids_raise_alert("UDP Flood", "ORTA", SCORE_ORTA, pi,
+                                    "Tek kaynaktan asiri UDP trafigi");
+            }
         }
 
         /* DNS anomali: tek kaynaktan aşırı sorgu */
@@ -901,6 +925,35 @@ void ids_cleanup(void) {
     g_ids_initialized = 0;
 }
 
+/* Lokal kaynakli (self) SYN taramasi: kendi makinenizden disariya yapilan
+ * port taramalari (ornek nmap) genel kurallara takilmaz cunku self trafik
+ * yanlis pozitifleri onlemek icin bastirilir. Bu kural yalnizca TCP SYN
+ * paketlerini sayar; ayni kaynaktan cok sayida FARKLI hedef porta SYN
+ * gidince uyari verir. Normal tarayici trafigi 2-3 porta dokunur,
+ * cok sayida farkli porta dokunmadigi surece tetiklenmez. */
+static void ids_check_local_scan(const IdsPktInfo *pi) {
+    char key[64];
+    IdsTracker *t;
+    if (!pi->is_tcp) return;
+    int is_syn = (pi->tcp_flags & 0x02) && !(pi->tcp_flags & 0x10);
+    if (!is_syn) return;
+    snprintf(key, sizeof(key), "L|%u", pi->src_ip);
+    t = ids_tracker_get(key);
+    if (t) {
+        ids_tracker_bump(t, pi->dst_port);
+        if (t->count >= 16 && t->unique_len >= 8 && ids_tracker_can_alert(t)) {
+            char desc[128];
+            char s[46];
+            ids_ip_to_str(pi->src_ip, s, sizeof(s));
+            snprintf(desc, sizeof(desc),
+                     "%s -> %u farkli porta disari SYN taramasi (%u paket)",
+                     s, t->unique_len, t->count);
+            ids_raise_alert("Yerel Kaynakli Port Taramasi", "YUKSEK",
+                            SCORE_YUKSEK, pi, desc);
+        }
+    }
+}
+
 void ids_process_packet(const PacketRecord *pkt) {
     if (!g_ids.running || !pkt) return;
 
@@ -908,11 +961,16 @@ void ids_process_packet(const PacketRecord *pkt) {
     ids_parse_pkt(pkt, &pi);
     if (!pi.is_ipv4 && !pi.is_arp) return;
 
-    /* Kendi urettigimiz trafik uyari uretmesin: otomatik ARP/ping
-     * taramasi (pcap kendi cercevelerini de gorur) ve fallback modun
-     * sentetik cerceveleri Broadcast Storm / Ping Sweep / SYN tarama
-     * kurallarini tetikleyip Uyarilar sekmesini dolduruyordu. */
-    if (ids_is_self_originated(&pi)) return;
+    /* Kendi urettigimiz trafik genel kurallari tetiklemesin: otomatik
+     * ARP/ping taramasi (pcap kendi cercevelerini de gorur) ve fallback
+     * modun sentetik cerceveleri Broadcast Storm / Ping Sweep / SYN tarama
+     * kurallarini tetikleyip Uyarilar sekmesini dolduruyordu. Ancak
+     * disariya yaptigimiz port taramalari da tespit edilsin istiyoruz;
+     * bu yuzden self trafikte yalnizca ids_check_local_scan() calisir. */
+    if (ids_is_self_originated(&pi)) {
+        ids_check_local_scan(&pi);
+        return;
+    }
 
     g_ids.total_pkts_processed++;
     ids_learn_binding(&pi);
@@ -965,7 +1023,5 @@ void ids_set_mac_context(const char *local_mac, const char *gateway_mac,
     if (g_local_ip && !ids_mac_zero(g_local_mac))
         ids_binding_seed(g_local_ip, g_local_mac);
 }
-
-
 
 
