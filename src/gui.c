@@ -1331,14 +1331,6 @@ static void draw_panel_tools(int W, int H) {
     } else {
       draw_panel_title(rx + 12, py + 8, "Paket Listesi", 13, COLOR_ACCENT);
     }
-    /* Kayit gostergesi */
-    if (capture_for_this) {
-      int tw = MeasureText(
-          g_capture_all ? "Trafik: Tum Ag" : "Trafik: ", 13);
-      draw_led((float)(rx + 30 + tw + 30), (float)(py + 14), 3.5f, COLOR_RED,
-               1);
-    }
-
     if (g_selected_packet_num != -1) {
       Rectangle back_btn = {rx + result_w - 80, py + 5, 70, 18};
       if (GuiButton(back_btn, "Geri Don")) {
