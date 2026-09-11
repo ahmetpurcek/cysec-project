@@ -511,7 +511,7 @@ typedef struct {
     uint32_t flags;                /* IDS_F_* */
     char     hostname[64];         /* DHCP/mDNS/NetBIOS'tan ogrenilen ad */
     uint32_t dns_qcount;           /* gonderilen DNS sorgusu sayisi */
-    uint32_t dns_dcount;           /* farkli alan adi sayisi */
+    uint32_t dns_dcount;           /* benzersiz, rastgele gorunumlu alan adi */
     char     dns_domains[40][128]; /* gorulen alan adlari (dedupe) */
     int      dns_pending_alert;    /* DGA uyarisi bekliyor */
     int      dns_pending_tunnel;   /* tunel sezgiseli tuttu */
@@ -521,6 +521,71 @@ typedef struct {
 
 static IdsHost g_hosts[IDS_MAX_HOSTS];
 static int g_host_count = 0;
+
+/* ---- SOC v3: DGA yanlis pozitif filtreleri ----
+ * Normal gezinme trafiği (CDN alt alanlari, PTR, mDNS, yerel adlar)
+ * DGA sayilmasin: yalnizca "rastgele gorunumlu" benzersiz
+ * kayit-edilebilir alan adlari sayaca girer. */
+static const char *k_dns_noise_sfx[] = {
+    ".arpa", ".local", ".lan", ".home", ".internal"
+};
+
+/* Yaklasik kayit-edilebilir alan adi (eTLD+1): son 2 label; co.uk /
+ * com.tr tarzi ikinci derece ccTLD'lerde son 3 label. */
+static void ids_registrable_domain(const char *qname, char *out, int outsz) {
+    const char *lb[16];
+    int ll[16], ln = 0;
+    const char *p = qname;
+    while (*p && ln < 16) {
+        const char *dot = strchr(p, '.');
+        int l = dot ? (int)(dot - p) : (int)strlen(p);
+        if (l <= 0) break;
+        lb[ln] = p; ll[ln] = l; ln++;
+        if (!dot) break;
+        p = dot + 1;
+    }
+    if (ln == 0) { out[0] = '\0'; return; }
+    int take = (ln >= 2) ? 2 : ln;
+    if (ln >= 3) {
+        static const char *cc[] = { "uk", "tr", "au", "br", "jp", "cn",
+                                    "in", "mx", "za", "kr", "nz", "sg",
+                                    "ar", "hk", "il" };
+        char l2[8];
+        int n = ll[ln - 2] < 7 ? ll[ln - 2] : 7;
+        memcpy(l2, lb[ln - 2], (size_t)n); l2[n] = '\0';
+        for (size_t i = 0; i < sizeof(cc) / sizeof(cc[0]); i++) {
+            if (strcmp(l2, cc[i]) == 0 &&
+                (ll[ln - 3] == 2 || ll[ln - 3] == 3)) { take = 3; break; }
+        }
+    }
+    int off = ln - take; if (off < 0) off = 0;
+    int total = 0;
+    for (int i = off; i < ln; i++) {
+        int c = snprintf(out + total, (size_t)(outsz - total),
+                         (i == off) ? "%.*s" : ".%.*s", ll[i], lb[i]);
+        if (c < 0 || total + c >= outsz) break;
+        total += c;
+    }
+}
+
+/* SLD (marka etiketi) rastgele gorunuyor mu? Rakam iceren veya cok
+ * uzun (>=14) SLD'ler DGA adayidir; googleapis / gstatic / pkgbuild
+ * gibi gercek markalar degildir. */
+static int ids_sld_suspicious(const char *reg) {
+    const char *dot = strchr(reg, '.');
+    int l = dot ? (int)(dot - reg) : (int)strlen(reg);
+    if (dot == NULL || l < 5) return 0;
+    int digits = 0, letters = 0;
+    for (int i = 0; i < l; i++) {
+        char c = reg[i];
+        if (c >= '0' && c <= '9') digits++;
+        else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) letters++;
+        else return 0; /* tire/altcizgi: olculu marka adi */
+    }
+    if (letters == 0) return 0;
+    return digits > 0 || l >= 14;
+}
+
 
 /* ---- SOC v3: korelasyonlu olay kayitlari (saldirgan->kurban cifti) ---- */
 #define IDS_MAX_INCIDENTS 32
@@ -790,35 +855,50 @@ static void ids_flow_update(const IdsPktInfo *pi, const PacketRecord *pkt) {
         if (pi->dst_port == 137 && pi->nbns_name[0] && sh)
             ids_hostname_learn(pi->src_ip, pi->nbns_name);
 
-        /* DNS sorgusu (kapsamdaki kaynak): alan adini say, tunel sezgiseli */
+        /* DNS sorgusu (kapsamdaki kaynak): DGA sayaci + tunel sezgiseli.
+         * GURULTU FILTRESI (yanlis pozitif onleme): PTR (.arpa), mDNS
+         * (.local) ve yerel adlar hic sayilmaz; ayni sitenin alt alanlari
+         * tek kayit-edilebilir alan adi olarak ele alinir; sayaca
+         * yalnizca rastgele gorunumlu SLD'ler girer. */
         if (pi->dst_port == 53 && !pi->dns_is_response && pi->dns_qdcount > 0 &&
             pi->dns_qname[0] && sh) {
-            int dup = 0;
-            for (int i = 0; i < (int)sh->dns_dcount && i < 40; i++) {
-                if (strcmp(sh->dns_domains[i], pi->dns_qname) == 0) { dup = 1; break; }
+            const char *qn = pi->dns_qname;
+            int noise = (strchr(qn, '.') == NULL);
+            for (size_t i = 0;
+                 i < sizeof(k_dns_noise_sfx) / sizeof(k_dns_noise_sfx[0]);
+                 i++) {
+                if (strstr(qn, k_dns_noise_sfx[i])) { noise = 1; break; }
             }
-            if (!dup && sh->dns_dcount < 40) {
-                strncpy(sh->dns_domains[sh->dns_dcount], pi->dns_qname,
-                        sizeof(sh->dns_domains[0]) - 1);
-                sh->dns_dcount++;
-            }
-            sh->dns_qcount++;
-
-            /* Tunel sezgiseli (tek seferlik): ilk label >= 12 karakter,
-             * hem rakam hem harf, tire yok -> DGA/tunel adayı */
-            if (!sh->dns_pending_tunnel) {
-                const char *p = pi->dns_qname;
-                int l = 0;
-                while (*p && *p != '.') { l++; p++; }
-                int digits = 0, letters = 0, hyph = 0;
-                for (int k = 0; k < l; k++) {
-                    char c = pi->dns_qname[k];
-                    if (c >= '0' && c <= '9') digits++;
-                    else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) letters++;
-                    else if (c == '-') hyph++;
+            if (!noise) {
+                char reg[256];
+                ids_registrable_domain(qn, reg, (int)sizeof(reg));
+                sh->dns_qcount++;
+                int dup = 0;
+                for (int i = 0; i < (int)sh->dns_dcount && i < 40; i++) {
+                    if (strcmp(sh->dns_domains[i], reg) == 0) { dup = 1; break; }
                 }
-                if (l >= 12 && digits > 0 && letters > 0 && hyph == 0)
-                    sh->dns_pending_tunnel = 1;
+                if (!dup && sh->dns_dcount < 40 && ids_sld_suspicious(reg)) {
+                    strncpy(sh->dns_domains[sh->dns_dcount], reg,
+                            sizeof(sh->dns_domains[0]) - 1);
+                    sh->dns_dcount++;
+                }
+
+                /* Tunel sezgiseli (tek seferlik): ilk label >= 12 karakter,
+                 * hem rakam hem harf, tire yok -> DGA/tunel adayı */
+                if (!sh->dns_pending_tunnel) {
+                    const char *p = qn;
+                    int l = 0;
+                    while (*p && *p != '.') { l++; p++; }
+                    int digits = 0, letters = 0, hyph = 0;
+                    for (int k = 0; k < l; k++) {
+                        char c = qn[k];
+                        if (c >= '0' && c <= '9') digits++;
+                        else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) letters++;
+                        else if (c == '-') hyph++;
+                    }
+                    if (l >= 12 && digits > 0 && letters > 0 && hyph == 0)
+                        sh->dns_pending_tunnel = 1;
+                }
             }
         }
     }
@@ -939,8 +1019,12 @@ static void ids_flow_analysis(void) {
             memset(&pi, 0, sizeof(pi));
             pi.src_ip = h->ip;
             pi.is_udp = 1;
+            char dgadesc[128];
+            snprintf(dgadesc, sizeof(dgadesc),
+                     "%u sorgu / %u benzersiz alan adi (olasi DGA)",
+                     h->dns_qcount, h->dns_dcount);
             ids_raise_alert("DGA Suphesi (C2)", "KRITIK", SCORE_KRITIK, &pi,
-                            "Cok sayida benzersiz alan adi sorgusu (olasi DGA)");
+                            dgadesc);
         }
         if (h->dns_pending_tunnel && !(h->flags & IDS_F_TUNNEL)) {
             h->flags |= IDS_F_TUNNEL;

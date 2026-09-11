@@ -1,7 +1,3 @@
 # Derleme ciktilari (platforma gore ayri klasorler)
-build-linux/
 build-win/
 
-# Her turlu derleme klasoru (yanlislikla olusursa izleme)
-/build/
-build-*/

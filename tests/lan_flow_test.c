@@ -454,7 +454,7 @@ int main(void) {
         uint64_t before = g_ids.total_alerts;
         for (int i = 0; i < 30; i++) {
             char q[64];
-            snprintf(q, sizeof(q), "dga%02d.example.com", i);
+            snprintf(q, sizeof(q), "dga%02dx7wq8k.com", i);
             PacketRecord p = pkt_dns(ip4("192.168.1.14"), ip4("192.168.1.1"),
                                      10000 + i, 53, q, 0, 0);
             ids_process_packet(&p);
@@ -596,7 +596,7 @@ int main(void) {
          * DGA(.14), DGA(.16), Tunel(.15) */
         for (int i = 0; i < 30; i++) {
             char q[64];
-            snprintf(q, sizeof(q), "dga%02d.example.com", i);
+            snprintf(q, sizeof(q), "dga%02dx7wq8k.com", i);
             PacketRecord p = pkt_dns(ip4("192.168.1.14"), ip4("192.168.1.1"),
                                      40000 + i, 53, q, 0, 0);
             ids_process_packet(&p);
@@ -677,6 +677,80 @@ int main(void) {
         CHECK(g_ids.total_alerts == before,
               "cooldown calismadi: %llu -> %llu",
               (unsigned long long)before,
+              (unsigned long long)g_ids.total_alerts);
+    }
+
+    printf("== DGA yanlis pozitif korumasi (gurultu sayilmaz) ==\n");
+    {
+        uint64_t base = g_ids.total_alerts;
+
+        /* 1) Normal gezinme trafiği: ayni sitenin alt alanlari + PTR +
+         *    mDNS + yerel adlar. 30 sorgu -> DGA UYARISI OLMAMALI. */
+        const char *benign[] = {
+            "mirror0.pkgbuild.com", "mirror1.pkgbuild.com",
+            "mirror2.pkgbuild.com", "geo.mirror.pkgbuild.com",
+            "update.googleapis.com", "fonts.googleapis.com",
+            "clients4.google.com", "www.gstatic.com",
+            "0.arch.pool.ntp.org", "1.arch.pool.ntp.org",
+            "ntp.ubuntu.com", "deb.debian.org",
+            "ping.archlinux.org", "archlinux.org",
+            "github.com", "api.github.com",
+            "cloudflare.com", "www.cloudflare.com",
+            "cdn.jsdelivr.net", "registry.npmjs.org",
+            "15.0.168.192.in-addr.arpa", "16.0.168.192.in-addr.arpa",
+            "9.4.233.178.in-addr.arpa",
+            "kodi-abc123._tcp.local", "spotify-connect-01._tcp.local",
+            "printer.home", "nas.internal", "router.lan",
+            "localhost", "wpad",
+        };
+        for (size_t i = 0; i < sizeof(benign) / sizeof(benign[0]); i++) {
+            PacketRecord p = pkt_dns(ip4("192.168.1.31"), ip4("192.168.1.1"),
+                                     (uint16_t)(40000 + i), 53, benign[i],
+                                     0, 0);
+            ids_process_packet(&p);
+        }
+        tick_analysis();
+        CHECK(g_ids.total_alerts == base,
+              "benign DNS trafiği DGA uyari uretti (%llu -> %llu)",
+              (unsigned long long)base,
+              (unsigned long long)g_ids.total_alerts);
+        int n31 = ids_get_host_threat_snapshot(&sn);
+        IdsHostThreat *h31 = find_host(&sn, "192.168.1.31");
+        CHECK(n31 > 0 && h31 != NULL, "benign host 31 olusmali");
+        CHECK(h31 != NULL && (h31->flags & IDS_F_DNS) == 0,
+              "benign host DGA bayragi aldi: %u",
+              h31 ? h31->flags : 0);
+
+        /* 2) Gercek DGA kalibi: 25+ benzersiz rastgele alan -> TAM 1 uyari */
+        for (int i = 0; i < 25; i++) {
+            char q[64];
+            snprintf(q, sizeof(q), "vqkzxmtdqplx%c%c.com", (char)('a' + i / 26), (char)('a' + i % 26));
+            PacketRecord p = pkt_dns(ip4("192.168.1.32"), ip4("192.168.1.1"),
+                                     (uint16_t)(41000 + i), 53, q, 0, 0);
+            ids_process_packet(&p);
+        }
+        tick_analysis();
+        CHECK(g_ids.total_alerts == base + 1,
+              "DGA kalibi tam 1 uyari uretmeli: %llu -> %llu",
+              (unsigned long long)base,
+              (unsigned long long)g_ids.total_alerts);
+        IdsGuiAlert da[4];
+        int dn = ids_get_alerts_snapshot(da, 4);
+        CHECK(dn >= 1 && strstr(da[dn - 1].sig_name, "DGA") != NULL,
+              "son uyari DGA olmali: %s",
+              dn >= 1 ? da[dn - 1].sig_name : "?");
+
+        /* Sticky: fazladan sorgu yeni uyari uretmez */
+        for (int i = 25; i < 30; i++) {
+            char q[64];
+            snprintf(q, sizeof(q), "vqkzxmtdqplx%c%c.com", (char)('a' + i / 26), (char)('a' + i % 26));
+            PacketRecord p = pkt_dns(ip4("192.168.1.32"), ip4("192.168.1.1"),
+                                     (uint16_t)(41000 + i), 53, q, 0, 0);
+            ids_process_packet(&p);
+        }
+        tick_analysis();
+        CHECK(g_ids.total_alerts == base + 1,
+              "DGA tekrar uyari uretti: %llu",
               (unsigned long long)g_ids.total_alerts);
     }
 
