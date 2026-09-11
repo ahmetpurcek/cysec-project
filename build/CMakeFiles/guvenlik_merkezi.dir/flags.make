@@ -6,5 +6,5 @@ C_DEFINES =
 
 C_INCLUDES = -I/home/robot/cysec-project/include -I/home/robot/cysec-project/lib
 
-C_FLAGS = -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
+C_FLAGS = -O3 -DNDEBUG -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
 

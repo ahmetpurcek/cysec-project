@@ -763,11 +763,7 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
     if (dev->last_seen > 0) {
       struct tm tmv;
       time_t lt = dev->last_seen;
-#if defined(_WIN32)
-      localtime_s(&tmv, &lt);
-#else
       localtime_r(&lt, &tmv);
-#endif
       strftime(last_seen, sizeof(last_seen), "%H:%M:%S", &tmv);
     }
     char tmpbuf[160];
@@ -2049,8 +2045,8 @@ void gui_init(int width, int height) {
   SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
   InitWindow(1280, 720, "CySec");
 
-  /* FLAG_WINDOW_MAXIMIZED bayragi bazi Windows ortamlarinda calismiyor.
-   * Acikca MaximizeWindow() cagirarak pencereyi maximize ediyoruz. */
+  /* FLAG_WINDOW_MAXIMIZED bayragi raylib'de güvenilir çalışmıyor;
+   * MaximizeWindow() ile açıkça maximize ediyoruz. */
   MaximizeWindow();
   SetWindowMinSize(800, 600);
 

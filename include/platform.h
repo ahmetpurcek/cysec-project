@@ -1,6 +1,5 @@
 /*
- * platform.h — Platform Soyutlama Katmanı
- * Windows ve Linux arası taşınabilirlik için ortak arayüz.
+ * platform.h — Platform Soyutlama Katmanı (Linux)
  */
 #ifndef PLATFORM_H
 #define PLATFORM_H
@@ -11,37 +10,18 @@
 #include <time.h>
 
 /* ========== Platform Tanımlayıcıları ========== */
-#ifdef _WIN32
-    #define PLATFORM_WINDOWS 1
-    #define PLATFORM_NAME "Windows"
-    typedef void* platform_thread_t;
-    typedef void* platform_mutex_t;
-#elif defined(__linux__)
-    #define PLATFORM_LINUX 1
-    #define PLATFORM_NAME "Linux"
-    #include <unistd.h>
-    #include <sys/socket.h>
-    #include <sys/ioctl.h>
-    #include <netinet/in.h>
-    #include <arpa/inet.h>
-    #include <net/if.h>
-    #include <netdb.h>
-    #include <pthread.h>
-    typedef pthread_t platform_thread_t;
-    typedef pthread_mutex_t platform_mutex_t;
-#endif
-
-/* ========== MSVC uyumluluk shims ========== */
-#if defined(_MSC_VER)
-    #define strdup      _strdup
-    #define strcasecmp  _stricmp
-    #define strncasecmp _strnicmp
-    #define popen       _popen
-    #define pclose      _pclose
-    #if _MSC_VER < 1900
-        #define snprintf _snprintf
-    #endif
-#endif
+#define PLATFORM_LINUX 1
+#define PLATFORM_NAME "Linux"
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <netdb.h>
+#include <pthread.h>
+typedef pthread_t platform_thread_t;
+typedef pthread_mutex_t platform_mutex_t;
 
 /* ========== Sabitler ========== */
 #define MAX_IP_LEN 46
@@ -71,9 +51,6 @@ int  platform_get_local_mac(const char *iface, char *mac, int len);
 int  platform_get_gateway(char *ip, int len, char *mac, int mac_len);
 int  platform_get_network_range(const char *iface, const char *local_ip, char *range, int len);
 int  platform_get_hostname(const char *ip, char *hostname, int len);
-
-/* Windows: varsayilan cikis arayuzunun adaptor GUID'i (\Device\NPF_{GUID} esleme icin) */
-int  platform_get_default_interface_guid(char *out, int len);
 
 /* Thread */
 int  platform_thread_create(platform_thread_t *thread, void *(*func)(void*), void *arg);

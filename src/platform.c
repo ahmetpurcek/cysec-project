@@ -1,12 +1,9 @@
 /*
- * platform.c — Platform Soyutlama Katmanı Uygulaması
- * Windows ve Linux için ortak arayüz implementasyonu.
+ * platform.c — Platform Soyutlama Katmanı Uygulaması (Linux)
  */
 #include "platform.h"
 #include <stdio.h>
 #include <string.h>
-
-#ifdef PLATFORM_LINUX
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <netinet/in.h>
@@ -16,38 +13,16 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <errno.h>
-#endif
-
-#ifdef PLATFORM_WINDOWS
-#include <winsock2.h>
-#include <windows.h>
-#include <ws2tcpip.h>
-#include <iphlpapi.h>
-#pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "iphlpapi.lib")
-#endif
 
 /* ========== Başlatma / Temizlik ========== */
 int platform_init(void) {
-#ifdef PLATFORM_WINDOWS
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        fprintf(stderr, "[Platform] Winsock başlatılamadı\n");
-        return -1;
-    }
-#endif
     return 0;
 }
 
 void platform_cleanup(void) {
-#ifdef PLATFORM_WINDOWS
-    WSACleanup();
-#endif
 }
 
-/* ========== Ağ Bilgisi — Linux ========== */
-#ifdef PLATFORM_LINUX
-
+/* ========== Ağ Bilgisi ========== */
 int platform_get_default_interface(char *iface, int len) {
     FILE *fp = popen("ip route show default 2>/dev/null", "r");
     if (!fp) { strncpy(iface, "eth0", len); return -1; }
@@ -239,7 +214,7 @@ int platform_get_hostname(const char *ip, char *hostname, int len) {
     return -1;
 }
 
-/* ========== Thread — Linux ========== */
+/* ========== Thread ========== */
 int platform_thread_create(platform_thread_t *thread, void *(*func)(void*), void *arg) {
     return pthread_create(thread, NULL, func, arg);
 }
@@ -248,7 +223,7 @@ void platform_thread_detach(platform_thread_t thread) {
     pthread_detach(thread);
 }
 
-/* ========== Mutex — Linux ========== */
+/* ========== Mutex ========== */
 int platform_mutex_init(platform_mutex_t *mutex) {
     return pthread_mutex_init(mutex, NULL);
 }
@@ -265,205 +240,9 @@ void platform_mutex_destroy(platform_mutex_t *mutex) {
     pthread_mutex_destroy(mutex);
 }
 
-#endif /* PLATFORM_LINUX */
-
-/* ========== Ağ Bilgisi — Windows ========== */
-#ifdef PLATFORM_WINDOWS
-
-/* GetAdaptersAddresses tamponu yeterli gelmezse ERROR_BUFFER_OVERFLOW doner;
- * tamponu buyuterek tekrar dene. Cagiran taraf free() ile birakmali. */
-static IP_ADAPTER_ADDRESSES *win_get_adapters(ULONG flags) {
-    ULONG buflen = 15000;
-    for (int tries = 0; tries < 4; tries++) {
-        IP_ADAPTER_ADDRESSES *a = (IP_ADAPTER_ADDRESSES *)malloc(buflen);
-        if (!a) return NULL;
-        ULONG r = GetAdaptersAddresses(AF_INET, flags, NULL, a, &buflen);
-        if (r == ERROR_SUCCESS) return a;
-        free(a);
-        if (r != ERROR_BUFFER_OVERFLOW) return NULL;
-        buflen *= 2;
-    }
-    return NULL;
-}
-
-int platform_get_default_interface(char *iface, int len) {
-    IP_ADAPTER_ADDRESSES *addrs = win_get_adapters(GAA_FLAG_INCLUDE_GATEWAYS);
-    if (!addrs) { strncpy(iface, "default", len); return -1; }
-    int ret = -1;
-    for (IP_ADAPTER_ADDRESSES *cur = addrs; cur; cur = cur->Next) {
-        if (cur->OperStatus != IfOperStatusUp) continue;
-        if (cur->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
-        if (cur->PhysicalAddressLength == 0) continue;
-        char fn[128] = {0};
-        WideCharToMultiByte(CP_UTF8, 0, cur->FriendlyName, -1,
-                            fn, sizeof(fn) - 1, NULL, NULL);
-        strncpy(iface, fn, len);
-        iface[len - 1] = '\0';
-        ret = 0;
-        break;
-    }
-    free(addrs);
-    if (ret != 0) strncpy(iface, "default", len);
-    return ret;
-}
-
-int platform_get_default_interface_guid(char *out, int len) {
-    out[0] = '\0';
-    /* Varsayilan rotanin cikis arayuzunun IfIndex'ini bul (8.8.8.8'e giden yol) */
-    struct sockaddr_in dst;
-    memset(&dst, 0, sizeof(dst));
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(80);
-    inet_pton(AF_INET, "8.8.8.8", &dst.sin_addr);
-    DWORD ifindex = 0;
-    if (GetBestInterfaceEx((struct sockaddr *)&dst, &ifindex) != NO_ERROR)
-        return -1;
-
-    IP_ADAPTER_ADDRESSES *addrs = win_get_adapters(0);
-    if (!addrs) return -1;
-    int ret = -1;
-    for (IP_ADAPTER_ADDRESSES *cur = addrs; cur; cur = cur->Next) {
-        if (cur->IfIndex == ifindex && cur->AdapterName) {
-            /* AdapterName = "{GUID}" metni (NPF aygit adinin son eki) */
-            strncpy(out, cur->AdapterName, len);
-            out[len - 1] = '\0';
-            ret = 0;
-            break;
-        }
-    }
-    free(addrs);
-    return ret;
-}
-
-int platform_get_local_ip(const char *iface, char *ip, int len) {
-    (void)iface;
-    char hostname[256];
-    gethostname(hostname, sizeof(hostname));
-    
-    struct addrinfo hints, *res;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    
-    if (getaddrinfo(hostname, NULL, &hints, &res) == 0) {
-        struct sockaddr_in *addr = (struct sockaddr_in *)res->ai_addr;
-        inet_ntop(AF_INET, &addr->sin_addr, ip, len);
-        freeaddrinfo(res);
-        return 0;
-    }
-    strncpy(ip, "127.0.0.1", len);
-    return -1;
-}
-
-int platform_get_local_mac(const char *iface, char *mac, int len) {
-    (void)iface;
-    IP_ADAPTER_ADDRESSES *addrs = win_get_adapters(0);
-    if (addrs) {
-        for (IP_ADAPTER_ADDRESSES *cur = addrs; cur; cur = cur->Next) {
-            if (cur->PhysicalAddressLength == 6 && cur->OperStatus == IfOperStatusUp) {
-                unsigned char *m = cur->PhysicalAddress;
-                snprintf(mac, len, "%02X:%02X:%02X:%02X:%02X:%02X",
-                         m[0], m[1], m[2], m[3], m[4], m[5]);
-                free(addrs);
-                return 0;
-            }
-        }
-        free(addrs);
-    }
-    strncpy(mac, "00:00:00:00:00:00", len);
-    return -1;
-}
-
-int platform_get_gateway(char *ip, int len, char *mac, int mac_len) {
-    IP_ADAPTER_ADDRESSES *addrs = win_get_adapters(GAA_FLAG_INCLUDE_GATEWAYS);
-    if (addrs) {
-        for (IP_ADAPTER_ADDRESSES *cur = addrs; cur; cur = cur->Next) {
-            IP_ADAPTER_GATEWAY_ADDRESS_LH *gw = cur->FirstGatewayAddress;
-            if (gw && cur->OperStatus == IfOperStatusUp) {
-                struct sockaddr_in *sa = (struct sockaddr_in *)gw->Address.lpSockaddr;
-                if (sa->sin_family == AF_INET) {
-                    inet_ntop(AF_INET, &sa->sin_addr, ip, len);
-                    if (mac) strncpy(mac, "N/A", mac_len);
-                    free(addrs);
-                    return 0;
-                }
-            }
-        }
-        free(addrs);
-    }
-    return -1;
-}
-
-int platform_get_network_range(const char *iface, const char *local_ip, char *range, int len) {
-    (void)iface;
-    int a, b, c, d;
-    if (sscanf(local_ip, "%d.%d.%d.%d", &a, &b, &c, &d) == 4) {
-        snprintf(range, len, "%d.%d.%d.0/24", a, b, c);
-        return 0;
-    }
-    return -1;
-}
-
-int platform_get_hostname(const char *ip, char *hostname, int len) {
-    struct sockaddr_in sa;
-    sa.sin_family = AF_INET;
-    inet_pton(AF_INET, ip, &sa.sin_addr);
-    
-    char host[NI_MAXHOST];
-    if (getnameinfo((struct sockaddr *)&sa, sizeof(sa), host, sizeof(host), NULL, 0, 0) == 0) {
-        if (strcmp(host, ip) != 0) {
-            strncpy(hostname, host, len);
-            hostname[len - 1] = '\0';
-            return 0;
-        }
-    }
-    hostname[0] = '\0';
-    return -1;
-}
-
-/* ========== Thread — Windows ========== */
-int platform_thread_create(platform_thread_t *thread, void *(*func)(void*), void *arg) {
-    *thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)func, arg, 0, NULL);
-    return (*thread == NULL) ? -1 : 0;
-}
-
-void platform_thread_detach(platform_thread_t thread) {
-    CloseHandle(thread);
-}
-
-/* ========== Mutex — Windows ========== */
-int platform_mutex_init(platform_mutex_t *mutex) {
-    *mutex = malloc(sizeof(CRITICAL_SECTION));
-    if (*mutex == NULL) return -1;
-    InitializeCriticalSection((CRITICAL_SECTION *)*mutex);
-    return 0;
-}
-
-void platform_mutex_lock(platform_mutex_t *mutex) {
-    EnterCriticalSection((CRITICAL_SECTION *)*mutex);
-}
-
-void platform_mutex_unlock(platform_mutex_t *mutex) {
-    LeaveCriticalSection((CRITICAL_SECTION *)*mutex);
-}
-
-void platform_mutex_destroy(platform_mutex_t *mutex) {
-    if (*mutex) {
-        DeleteCriticalSection((CRITICAL_SECTION *)*mutex);
-        free(*mutex);
-        *mutex = NULL;
-    }
-}
-
-#endif /* PLATFORM_WINDOWS */
-
 /* ========== Ortak Fonksiyonlar ========== */
 void platform_sleep_ms(unsigned int ms) {
-#ifdef PLATFORM_WINDOWS
-    Sleep(ms);
-#else
     usleep(ms * 1000);
-#endif
 }
 
 int platform_run_command(const char *cmd, char *output, int output_len) {
@@ -488,9 +267,5 @@ int platform_run_command(const char *cmd, char *output, int output_len) {
 }
 
 const char *platform_path_separator(void) {
-#ifdef PLATFORM_WINDOWS
-    return "\\";
-#else
     return "/";
-#endif
 }

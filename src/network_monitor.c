@@ -27,34 +27,6 @@
 #include <fcntl.h>
 #endif
 
-#if defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP)
-/* Windows: gerçek pcap API'si — Npcap SDK (npcap.com) ile derlenir, libwpcap'a bağlanır */
-#include <pcap.h>
-#elif defined(PLATFORM_WINDOWS)
-/* Npcap SDK'sız derleme: pcap sahte (stub) — canlı trafik izleme kapalı kalır,
- * proje yine de derlenir; GUI, ARP tarama ve port tarama çalışır. */
-/* Stub dalda da IPv6 dissector gerekli: in6_addr, INET6_ADDRSTRLEN, inet_ntop */
-#include <winsock2.h>
-#include <ws2tcpip.h>
-typedef unsigned char u_char;
-struct dummy_timeval { long tv_sec; long tv_usec; };
-struct pcap_pkthdr {
-    struct dummy_timeval ts;
-    unsigned int caplen;
-    unsigned int len;
-};
-typedef void pcap_t;
-#define DLT_EN10MB 1
-#define PCAP_ERRBUF_SIZE 256
-#define PCAP_ERROR_BREAK (-2)
-static inline void *pcap_open_live(const char *device, int snaplen, int promisc, int to_ms, char *errbuf) {
-    (void)device; (void)snaplen; (void)promisc; (void)to_ms;
-    if (errbuf) snprintf(errbuf, PCAP_ERRBUF_SIZE, "Npcap kurulu degil");
-    return NULL;
-}
-static inline int pcap_datalink(void *p) { (void)p; return 1; }
-static inline void pcap_close(void *p) { (void)p; }
-#endif
 
 static int initialized = 0;
 static int running = 0;
@@ -73,7 +45,7 @@ static int total_captured = 0;  /* toplam yakalanan paket (kümülatif, sadece s
 /* ---- STATS ---- */
 static FullStats stats;
 
-#if defined(PLATFORM_LINUX) || (defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP))
+#if defined(PLATFORM_LINUX)
 static pcap_t *pcap_handle = NULL;
 static int g_datalink_type = 1; /* DLT_EN10MB default */
 #endif
@@ -1202,7 +1174,7 @@ static void handle_packet(const struct pcap_pkthdr *header, const u_char *packet
 #endif
 
     /* IDS besleme: ham veri yalnizca Ethernet datalink'te guvenilir */
-#if defined(PLATFORM_LINUX) || (defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP))
+#if defined(PLATFORM_LINUX)
     if (g_datalink_type == DLT_EN10MB)
         ids_process_packet(&pkt);
 #endif
@@ -1223,7 +1195,7 @@ static void handle_packet(const struct pcap_pkthdr *header, const u_char *packet
     platform_mutex_unlock(&global_lock);
 }
 
-#if defined(PLATFORM_LINUX) || (defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP))
+#if defined(PLATFORM_LINUX)
 static void pcap_cb(u_char *user, const struct pcap_pkthdr *h, const u_char *pkt) {
     (void)user;
     handle_packet(h, pkt);
@@ -1505,7 +1477,7 @@ static void *procnet_fallback_thread(void *arg) {
 
 static void *monitor_thread(void *arg) {
     char *iface = (char *)arg;
-#if defined(PLATFORM_LINUX) || (defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP))
+#if defined(PLATFORM_LINUX)
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t *handle = NULL;
 
@@ -1541,27 +1513,6 @@ static void *monitor_thread(void *arg) {
         }
 #endif /* PLATFORM_LINUX */
 
-#if defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP)
-        /* Phase 0 (Windows): varsayilan adaptoru GUID'inden bul ve NPF aygitini ac.
-         * Npcap aygit adlari \Device\NPF_{GUID} seklindedir. */
-        {
-            char guid_name[128];
-            if (platform_get_default_interface_guid(guid_name, sizeof(guid_name)) == 0) {
-                pcap_if_t *gd;
-                if (pcap_findalldevs(&gd, errbuf) >= 0 && gd) {
-                    for (pcap_if_t *d = gd; d && !handle; d = d->next) {
-                        if (strstr(d->name, guid_name)) {
-                            handle = try_open_ethernet(d->name, errbuf);
-                            if (handle)
-                                fprintf(stderr, "[FULL_MONITOR] Varsayilan adaptor: %s (%s)\n",
-                                        d->name, d->description ? d->description : "?");
-                        }
-                    }
-                    pcap_freealldevs(gd);
-                }
-            }
-        }
-#endif
 
         pcap_if_t *devs;
         if (!handle && pcap_findalldevs(&devs, errbuf) >= 0 && devs) {
@@ -1668,19 +1619,11 @@ static void *monitor_thread(void *arg) {
         pcap_close(handle);
         pcap_handle = NULL;
     } else {
-        /* ===== FALLBACK: pcap acilamadi ===== */
-        fprintf(stderr, "[FULL_MONITOR] pcap failed: %s\n", errbuf);
-        g_capture_mode = 1;   /* procfs fallback: yalnızca yerel trafik */
-#ifdef PLATFORM_LINUX
+        /* pcap açılamadı: procfs fallback */
+        g_capture_mode = 1;
         procnet_fallback_thread(NULL);
-#else
-        fprintf(stderr, "[FULL_MONITOR] Windows: Npcap kurulumunu ve yonetici yetkisini kontrol edin.\n");
-#endif
     }
-#endif
-#if defined(PLATFORM_WINDOWS) && !defined(HAVE_NPCAP)
-    fprintf(stderr, "[FULL_MONITOR] Windows: canli trafik izleme icin Npcap gerekir (npcap.com). "
-                    "Proje Npcap SDK'siz derlendigi icin pcap devre disi birakildi.\n");
+
 #endif
     free(iface);
     return NULL;
@@ -1697,7 +1640,7 @@ void full_monitor_start(const char *iface) {
 
 void full_monitor_stop(void) {
     running = 0;
-#if defined(PLATFORM_LINUX) || (defined(PLATFORM_WINDOWS) && defined(HAVE_NPCAP))
+#if defined(PLATFORM_LINUX)
     if (pcap_handle) pcap_breakloop(pcap_handle);
 #endif
     platform_sleep_ms(150);  /* thread'in kapanması için kısa bekle */
@@ -2206,26 +2149,5 @@ int arp_spoof_is_running(void) {
 const char *arp_spoof_get_target(void) {
     return g_spoof_target_ip;
 }
-
-#else /* PLATFORM_WINDOWS — stub */
-
-void enable_ip_forward(void) {}
-void disable_ip_forward(void) {}
-void arp_spoof_start(const char *target_ip, const char *gateway_ip, const char *iface) {
-    (void)target_ip; (void)gateway_ip; (void)iface;
-    fprintf(stderr, "[ARP_SPOOF] Windows'da desteklenmiyor.\n");
-}
-void arp_spoof_stop(void) {}
-int  arp_spoof_is_running(void) { return 0; }
-const char *arp_spoof_get_target(void) { return ""; }
-void arp_spoof_start_all(const char *gateway_ip, const char *iface) {
-    (void)gateway_ip; (void)iface;
-    fprintf(stderr, "[ARP_SPOOF] Windows'da desteklenmiyor.\n");
-}
-void arp_spoof_sync_targets(const Device *devices, int count,
-                            const char *gateway_ip, const char *local_ip) {
-    (void)devices; (void)count; (void)gateway_ip; (void)local_ip;
-}
-int  arp_spoof_get_target_count(void) { return 0; }
 
 #endif /* PLATFORM_LINUX */

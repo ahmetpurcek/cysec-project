@@ -27,18 +27,6 @@
 #include <math.h>
 #include <stdint.h>
 
-#ifdef PLATFORM_WINDOWS
-#include <winsock2.h>
-#include <windows.h>
-#include <ws2tcpip.h>
-#include <process.h>
-#define getpid _getpid
-typedef int socklen_t;
-#else
-typedef int SOCKET;
-#endif
-
-#ifdef PLATFORM_LINUX
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netinet/in.h>
@@ -57,7 +45,7 @@ typedef int SOCKET;
 #define INVALID_SOCKET (-1)
 #define SOCKET_ERROR   (-1)
 #define closesocket close
-#endif
+
 
 /* ========== TCP Flag Sabitleri ========== */
 #define TF_FIN 0x01
@@ -1431,18 +1419,7 @@ static void *_scan_manager(void *arg) {
     g_results.stealth           = g_stealth;
     platform_mutex_unlock(&g_results.lock);
 
-#ifndef PLATFORM_LINUX
-    /* Windows: raw socket tabanli gizli tarama turleri (SYN/FIN/NULL/XMAS/ACK
-     * vb.) desteklenmiyor; _worker icinde zaten TCP Connect scan'e dusuyor.
-     * Kullaniciyi bir kez uyar. */
-    if (md->type != PS_SCAN_CONNECT && md->type != PS_SCAN_UDP) {
-        static int warned_once = 0;
-        if (!warned_once) {
-            warned_once = 1;
-            fprintf(stderr, "[PORTSCAN] Windows: gizli (stealth) tarama turleri desteklenmiyor, TCP Connect scan kullanilacak.\n");
-        }
-    }
-#endif
+
 
     uint32_t ip = inet_addr(md->ip_str);
     _shuffle(md->ports, md->port_count);

@@ -20,6 +20,7 @@ events:
     names:
       - "uname"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -31,10 +32,12 @@ events:
       - "/usr/games/bin/"
       - "/bin/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/uname"
       - "/home/robot/bin/uname"
     found: "/sbin/uname"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -72,6 +75,7 @@ events:
       - "make"
       - "smake"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -82,6 +86,7 @@ events:
       - "/usr/bin/core_perl/"
       - "/usr/games/bin/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/gmake"
       - "/home/robot/bin/gmake"
       - "/sbin/gmake"
       - "/usr/bin/gmake"
@@ -91,10 +96,12 @@ events:
       - "/opt/bin/gmake"
       - "/usr/bin/core_perl/gmake"
       - "/usr/games/bin/gmake"
+      - "/home/robot/.gemini/antigravity-ide/bin/make"
       - "/home/robot/bin/make"
     found: "/sbin/make"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -130,6 +137,7 @@ events:
       - "icx"
       - "clang"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -140,10 +148,12 @@ events:
       - "/usr/bin/core_perl/"
       - "/usr/games/bin/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/cc"
       - "/home/robot/bin/cc"
     found: "/sbin/cc"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -180,6 +190,7 @@ events:
     found: "/usr/share/cmake/Modules/CMakeCCompilerId.c.in"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -232,6 +243,7 @@ events:
       - "ar"
     candidate_directories:
       - "/sbin/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/usr/bin/"
       - "/usr/sbin/"
@@ -243,6 +255,7 @@ events:
     found: "/sbin/ar"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -273,6 +286,7 @@ events:
       - "ranlib"
     candidate_directories:
       - "/sbin/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/usr/bin/"
       - "/usr/sbin/"
@@ -284,6 +298,7 @@ events:
     found: "/sbin/ranlib"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -314,6 +329,7 @@ events:
       - "strip"
     candidate_directories:
       - "/sbin/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/usr/bin/"
       - "/usr/sbin/"
@@ -325,6 +341,7 @@ events:
     found: "/sbin/strip"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -355,6 +372,7 @@ events:
       - "ld"
     candidate_directories:
       - "/sbin/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/usr/bin/"
       - "/usr/sbin/"
@@ -366,6 +384,7 @@ events:
     found: "/sbin/ld"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -396,6 +415,7 @@ events:
       - "nm"
     candidate_directories:
       - "/sbin/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/usr/bin/"
       - "/usr/sbin/"
@@ -407,6 +427,7 @@ events:
     found: "/sbin/nm"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -437,6 +458,7 @@ events:
       - "objdump"
     candidate_directories:
       - "/sbin/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/usr/bin/"
       - "/usr/sbin/"
@@ -448,6 +470,7 @@ events:
     found: "/sbin/objdump"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -478,6 +501,7 @@ events:
       - "objcopy"
     candidate_directories:
       - "/sbin/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/usr/bin/"
       - "/usr/sbin/"
@@ -489,6 +513,7 @@ events:
     found: "/sbin/objcopy"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -519,6 +544,7 @@ events:
       - "readelf"
     candidate_directories:
       - "/sbin/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/usr/bin/"
       - "/usr/sbin/"
@@ -530,6 +556,7 @@ events:
     found: "/sbin/readelf"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -560,6 +587,7 @@ events:
       - "dlltool"
     candidate_directories:
       - "/sbin/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/usr/bin/"
       - "/usr/sbin/"
@@ -570,6 +598,7 @@ events:
       - "/usr/games/bin/"
     searched_directories:
       - "/sbin/dlltool"
+      - "/home/robot/.gemini/antigravity-ide/bin/dlltool"
       - "/home/robot/bin/dlltool"
       - "/usr/bin/dlltool"
       - "/usr/sbin/dlltool"
@@ -581,6 +610,7 @@ events:
     found: false
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -611,6 +641,7 @@ events:
       - "addr2line"
     candidate_directories:
       - "/sbin/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/usr/bin/"
       - "/usr/sbin/"
@@ -622,6 +653,7 @@ events:
     found: "/sbin/addr2line"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -652,6 +684,7 @@ events:
       - "tapi"
     candidate_directories:
       - "/sbin/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/usr/bin/"
       - "/usr/sbin/"
@@ -662,6 +695,7 @@ events:
       - "/usr/games/bin/"
     searched_directories:
       - "/sbin/tapi"
+      - "/home/robot/.gemini/antigravity-ide/bin/tapi"
       - "/home/robot/bin/tapi"
       - "/usr/bin/tapi"
       - "/usr/sbin/tapi"
@@ -673,6 +707,7 @@ events:
     found: false
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -706,6 +741,7 @@ events:
       - "gcc-ar"
     candidate_directories:
       - "/sbin/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/usr/bin/"
       - "/usr/sbin/"
@@ -716,6 +752,7 @@ events:
       - "/usr/games/bin/"
     searched_directories:
       - "/sbin/gcc-ar-16.2"
+      - "/home/robot/.gemini/antigravity-ide/bin/gcc-ar-16.2"
       - "/home/robot/bin/gcc-ar-16.2"
       - "/usr/bin/gcc-ar-16.2"
       - "/usr/sbin/gcc-ar-16.2"
@@ -725,6 +762,7 @@ events:
       - "/usr/bin/core_perl/gcc-ar-16.2"
       - "/usr/games/bin/gcc-ar-16.2"
       - "/sbin/gcc-ar-16"
+      - "/home/robot/.gemini/antigravity-ide/bin/gcc-ar-16"
       - "/home/robot/bin/gcc-ar-16"
       - "/usr/bin/gcc-ar-16"
       - "/usr/sbin/gcc-ar-16"
@@ -734,6 +772,7 @@ events:
       - "/usr/bin/core_perl/gcc-ar-16"
       - "/usr/games/bin/gcc-ar-16"
       - "/sbin/gcc-ar16"
+      - "/home/robot/.gemini/antigravity-ide/bin/gcc-ar16"
       - "/home/robot/bin/gcc-ar16"
       - "/usr/bin/gcc-ar16"
       - "/usr/sbin/gcc-ar16"
@@ -745,6 +784,7 @@ events:
     found: "/sbin/gcc-ar"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -778,6 +818,7 @@ events:
       - "gcc-ranlib"
     candidate_directories:
       - "/sbin/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/usr/bin/"
       - "/usr/sbin/"
@@ -788,6 +829,7 @@ events:
       - "/usr/games/bin/"
     searched_directories:
       - "/sbin/gcc-ranlib-16.2"
+      - "/home/robot/.gemini/antigravity-ide/bin/gcc-ranlib-16.2"
       - "/home/robot/bin/gcc-ranlib-16.2"
       - "/usr/bin/gcc-ranlib-16.2"
       - "/usr/sbin/gcc-ranlib-16.2"
@@ -797,6 +839,7 @@ events:
       - "/usr/bin/core_perl/gcc-ranlib-16.2"
       - "/usr/games/bin/gcc-ranlib-16.2"
       - "/sbin/gcc-ranlib-16"
+      - "/home/robot/.gemini/antigravity-ide/bin/gcc-ranlib-16"
       - "/home/robot/bin/gcc-ranlib-16"
       - "/usr/bin/gcc-ranlib-16"
       - "/usr/sbin/gcc-ranlib-16"
@@ -806,6 +849,7 @@ events:
       - "/usr/bin/core_perl/gcc-ranlib-16"
       - "/usr/games/bin/gcc-ranlib-16"
       - "/sbin/gcc-ranlib16"
+      - "/home/robot/.gemini/antigravity-ide/bin/gcc-ranlib16"
       - "/home/robot/bin/gcc-ranlib16"
       - "/usr/bin/gcc-ranlib16"
       - "/usr/sbin/gcc-ranlib16"
@@ -817,6 +861,7 @@ events:
     found: "/sbin/gcc-ranlib"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -835,8 +880,8 @@ events:
     checks:
       - "Detecting C compiler ABI info"
     directories:
-      source: "/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-MPG66O"
-      binary: "/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-MPG66O"
+      source: "/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-h4q5B5"
+      binary: "/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-h4q5B5"
     cmakeVariables:
       CMAKE_C_FLAGS: ""
       CMAKE_C_FLAGS_DEBUG: "-g"
@@ -845,14 +890,13 @@ events:
       variable: "CMAKE_C_ABI_COMPILED"
       cached: false
       stdout: |
-        Change Dir: '/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-MPG66O'
+        Change Dir: '/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-h4q5B5'
         
-        Run Build Command(s): /sbin/cmake -E env VERBOSE=1 /sbin/make -f Makefile cmTC_5f2af/fast
-        make[1]: Entering directory '/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-MPG66O'
-        /sbin/make  -f CMakeFiles/cmTC_5f2af.dir/build.make CMakeFiles/cmTC_5f2af.dir/build
-        make[2]: Entering directory '/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-MPG66O'
-        Building C object CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o
-        /sbin/cc   -v -o CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o -c /usr/share/cmake/Modules/CMakeCCompilerABI.c
+        Run Build Command(s): /sbin/cmake -E env VERBOSE=1 /sbin/make -f Makefile cmTC_140e1/fast
+        /sbin/make  -f CMakeFiles/cmTC_140e1.dir/build.make CMakeFiles/cmTC_140e1.dir/build
+        make[1]: Entering directory '/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-h4q5B5'
+        Building C object CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o
+        /sbin/cc   -v -o CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o -c /usr/share/cmake/Modules/CMakeCCompilerABI.c
         Using built-in specs.
         COLLECT_GCC=/sbin/cc
         Target: x86_64-pc-linux-gnu
@@ -860,8 +904,8 @@ events:
         Thread model: posix
         Supported LTO compression algorithms: zlib zstd
         gcc version 16.2.1 20260810 (GCC) 
-        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_5f2af.dir/'
-         /usr/lib/gcc/x86_64-pc-linux-gnu/16/cc1 -quiet -v /usr/share/cmake/Modules/CMakeCCompilerABI.c -quiet -dumpdir CMakeFiles/cmTC_5f2af.dir/ -dumpbase CMakeCCompilerABI.c.c -dumpbase-ext .c -mtune=generic -march=x86-64 -version -o /tmp/cc5asBB7.s
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_140e1.dir/'
+         /usr/lib/gcc/x86_64-pc-linux-gnu/16/cc1 -quiet -v /usr/share/cmake/Modules/CMakeCCompilerABI.c -quiet -dumpdir CMakeFiles/cmTC_140e1.dir/ -dumpbase CMakeCCompilerABI.c.c -dumpbase-ext .c -mtune=generic -march=x86-64 -version -o /tmp/ccsK5ymA.s
         GNU C23 (GCC) version 16.2.1 20260810 (x86_64-pc-linux-gnu)
         	compiled by GNU C version 16.2.1 20260810, GMP version 6.3.0, MPFR version 4.2.2, MPC version 1.4.1, isl version isl-0.28-GMP
         
@@ -875,14 +919,14 @@ events:
          /usr/include
         End of search list.
         Compiler executable checksum: f931fde8682f21d1ebcf65f6b881e532
-        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_5f2af.dir/'
-         as -v --64 -o CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o /tmp/cc5asBB7.s
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_140e1.dir/'
+         as -v --64 -o CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o /tmp/ccsK5ymA.s
         GNU assembler version 2.47 (x86_64-pc-linux-gnu) using BFD version (GNU Binutils) 2.47
         COMPILER_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/
         LIBRARY_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/:/lib/../lib/:/usr/lib/../lib/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../:/lib/:/usr/lib/
-        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.'
-        Linking C executable cmTC_5f2af
-        /sbin/cmake -E cmake_link_script CMakeFiles/cmTC_5f2af.dir/link.txt --verbose=1
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.'
+        Linking C executable cmTC_140e1
+        /sbin/cmake -E cmake_link_script CMakeFiles/cmTC_140e1.dir/link.txt --verbose=1
         Using built-in specs.
         COLLECT_GCC=/sbin/cc
         COLLECT_LTO_WRAPPER=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper
@@ -893,15 +937,14 @@ events:
         gcc version 16.2.1 20260810 (GCC) 
         COMPILER_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/
         LIBRARY_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/:/lib/../lib/:/usr/lib/../lib/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../:/lib/:/usr/lib/
-        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_5f2af' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_5f2af.'
-         /usr/lib/gcc/x86_64-pc-linux-gnu/16/collect2 -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccoP1CJt.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_5f2af /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o -lgcc -lgcc_s_asneeded -latomic_asneeded -lc -lgcc -lgcc_s_asneeded /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o
+        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_140e1' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_140e1.'
+         /usr/lib/gcc/x86_64-pc-linux-gnu/16/collect2 -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/cc92grpF.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_140e1 /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o -lgcc -lgcc_s_asneeded -latomic_asneeded -lc -lgcc -lgcc_s_asneeded /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o
         collect2 version 16.2.1 20260810
-        /sbin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccoP1CJt.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_5f2af /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o -lgcc -lgcc_s_asneeded -latomic_asneeded -lc -lgcc -lgcc_s_asneeded /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o
+        /sbin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/cc92grpF.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_140e1 /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o -lgcc -lgcc_s_asneeded -latomic_asneeded -lc -lgcc -lgcc_s_asneeded /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o
         GNU ld (GNU Binutils) 2.47
-        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_5f2af' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_5f2af.'
-        /sbin/cc  -v -Wl,-v CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o -o cmTC_5f2af
-        make[2]: Leaving directory '/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-MPG66O'
-        make[1]: Leaving directory '/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-MPG66O'
+        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_140e1' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_140e1.'
+        /sbin/cc  -v -Wl,-v CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o -o cmTC_140e1
+        make[1]: Leaving directory '/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-h4q5B5'
         
       exitCode: 0
   -
@@ -934,14 +977,13 @@ events:
       Parsed C implicit link information:
         link line regex: [^( *|.*[/\\])(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)|wild|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
         linker tool regex: [^[ 	]*(->|"|[0-9]+>[ 	-]*Build:[ 	0-9]+ ms[ 	]*)?[ 	]*(([^"]*[/\\])?(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)|wild))("|,| |$)]
-        ignore line: [Change Dir: '/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-MPG66O']
+        ignore line: [Change Dir: '/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-h4q5B5']
         ignore line: []
-        ignore line: [Run Build Command(s): /sbin/cmake -E env VERBOSE=1 /sbin/make -f Makefile cmTC_5f2af/fast]
-        ignore line: [make[1]: Entering directory '/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-MPG66O']
-        ignore line: [/sbin/make  -f CMakeFiles/cmTC_5f2af.dir/build.make CMakeFiles/cmTC_5f2af.dir/build]
-        ignore line: [make[2]: Entering directory '/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-MPG66O']
-        ignore line: [Building C object CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o]
-        ignore line: [/sbin/cc   -v -o CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o -c /usr/share/cmake/Modules/CMakeCCompilerABI.c]
+        ignore line: [Run Build Command(s): /sbin/cmake -E env VERBOSE=1 /sbin/make -f Makefile cmTC_140e1/fast]
+        ignore line: [/sbin/make  -f CMakeFiles/cmTC_140e1.dir/build.make CMakeFiles/cmTC_140e1.dir/build]
+        ignore line: [make[1]: Entering directory '/home/robot/cysec-project/build/CMakeFiles/CMakeScratch/TryCompile-h4q5B5']
+        ignore line: [Building C object CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o]
+        ignore line: [/sbin/cc   -v -o CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o -c /usr/share/cmake/Modules/CMakeCCompilerABI.c]
         ignore line: [Using built-in specs.]
         ignore line: [COLLECT_GCC=/sbin/cc]
         ignore line: [Target: x86_64-pc-linux-gnu]
@@ -949,8 +991,8 @@ events:
         ignore line: [Thread model: posix]
         ignore line: [Supported LTO compression algorithms: zlib zstd]
         ignore line: [gcc version 16.2.1 20260810 (GCC) ]
-        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_5f2af.dir/']
-        ignore line: [ /usr/lib/gcc/x86_64-pc-linux-gnu/16/cc1 -quiet -v /usr/share/cmake/Modules/CMakeCCompilerABI.c -quiet -dumpdir CMakeFiles/cmTC_5f2af.dir/ -dumpbase CMakeCCompilerABI.c.c -dumpbase-ext .c -mtune=generic -march=x86-64 -version -o /tmp/cc5asBB7.s]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_140e1.dir/']
+        ignore line: [ /usr/lib/gcc/x86_64-pc-linux-gnu/16/cc1 -quiet -v /usr/share/cmake/Modules/CMakeCCompilerABI.c -quiet -dumpdir CMakeFiles/cmTC_140e1.dir/ -dumpbase CMakeCCompilerABI.c.c -dumpbase-ext .c -mtune=generic -march=x86-64 -version -o /tmp/ccsK5ymA.s]
         ignore line: [GNU C23 (GCC) version 16.2.1 20260810 (x86_64-pc-linux-gnu)]
         ignore line: [	compiled by GNU C version 16.2.1 20260810  GMP version 6.3.0  MPFR version 4.2.2  MPC version 1.4.1  isl version isl-0.28-GMP]
         ignore line: []
@@ -964,14 +1006,14 @@ events:
         ignore line: [ /usr/include]
         ignore line: [End of search list.]
         ignore line: [Compiler executable checksum: f931fde8682f21d1ebcf65f6b881e532]
-        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_5f2af.dir/']
-        ignore line: [ as -v --64 -o CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o /tmp/cc5asBB7.s]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_140e1.dir/']
+        ignore line: [ as -v --64 -o CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o /tmp/ccsK5ymA.s]
         ignore line: [GNU assembler version 2.47 (x86_64-pc-linux-gnu) using BFD version (GNU Binutils) 2.47]
         ignore line: [COMPILER_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/]
         ignore line: [LIBRARY_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/:/lib/../lib/:/usr/lib/../lib/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../:/lib/:/usr/lib/]
-        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.']
-        ignore line: [Linking C executable cmTC_5f2af]
-        ignore line: [/sbin/cmake -E cmake_link_script CMakeFiles/cmTC_5f2af.dir/link.txt --verbose=1]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.']
+        ignore line: [Linking C executable cmTC_140e1]
+        ignore line: [/sbin/cmake -E cmake_link_script CMakeFiles/cmTC_140e1.dir/link.txt --verbose=1]
         ignore line: [Using built-in specs.]
         ignore line: [COLLECT_GCC=/sbin/cc]
         ignore line: [COLLECT_LTO_WRAPPER=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper]
@@ -982,13 +1024,13 @@ events:
         ignore line: [gcc version 16.2.1 20260810 (GCC) ]
         ignore line: [COMPILER_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/]
         ignore line: [LIBRARY_PATH=/usr/lib/gcc/x86_64-pc-linux-gnu/16/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/:/lib/../lib/:/usr/lib/../lib/:/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../:/lib/:/usr/lib/]
-        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_5f2af' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_5f2af.']
-        link line: [ /usr/lib/gcc/x86_64-pc-linux-gnu/16/collect2 -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccoP1CJt.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_5f2af /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o -lgcc -lgcc_s_asneeded -latomic_asneeded -lc -lgcc -lgcc_s_asneeded /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_140e1' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_140e1.']
+        link line: [ /usr/lib/gcc/x86_64-pc-linux-gnu/16/collect2 -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/cc92grpF.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_140e1 /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o -lgcc -lgcc_s_asneeded -latomic_asneeded -lc -lgcc -lgcc_s_asneeded /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o]
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/collect2] ==> ignore
           arg [-plugin] ==> ignore
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so] ==> ignore
           arg [-plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper] ==> ignore
-          arg [-plugin-opt=-fresolution=/tmp/ccoP1CJt.res] ==> ignore
+          arg [-plugin-opt=-fresolution=/tmp/cc92grpF.res] ==> ignore
           arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
           arg [-plugin-opt=-pass-through=-lgcc_s_asneeded] ==> ignore
           arg [-plugin-opt=-pass-through=-latomic_asneeded] ==> ignore
@@ -1004,7 +1046,7 @@ events:
           arg [/lib64/ld-linux-x86-64.so.2] ==> ignore
           arg [-pie] ==> ignore
           arg [-o] ==> ignore
-          arg [cmTC_5f2af] ==> ignore
+          arg [cmTC_140e1] ==> ignore
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o] ==> obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o]
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o] ==> obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o]
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o] ==> obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o]
@@ -1016,7 +1058,7 @@ events:
           arg [-L/lib] ==> dir [/lib]
           arg [-L/usr/lib] ==> dir [/usr/lib]
           arg [-v] ==> ignore
-          arg [CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o] ==> ignore
+          arg [CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o] ==> ignore
           arg [-lgcc] ==> lib [gcc]
           arg [-lgcc_s_asneeded] ==> lib [gcc_s_asneeded]
           arg [-latomic_asneeded] ==> lib [atomic_asneeded]
@@ -1026,9 +1068,9 @@ events:
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o] ==> obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o]
           arg [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o] ==> obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o]
         ignore line: [collect2 version 16.2.1 20260810]
-        link line: [/sbin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccoP1CJt.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_5f2af /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o -lgcc -lgcc_s_asneeded -latomic_asneeded -lc -lgcc -lgcc_s_asneeded /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o] ==> linker [/sbin/ld]
-        link line: [/sbin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccoP1CJt.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_5f2af /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o -lgcc -lgcc_s_asneeded -latomic_asneeded -lc -lgcc -lgcc_s_asneeded /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o] ==> linker architecture flags [-m;elf]
-        ignore line: [/sbin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccoP1CJt.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_5f2af /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_5f2af.dir/CMakeCCompilerABI.c.o -lgcc -lgcc_s_asneeded -latomic_asneeded -lc -lgcc -lgcc_s_asneeded /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o]
+        link line: [/sbin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/cc92grpF.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_140e1 /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o -lgcc -lgcc_s_asneeded -latomic_asneeded -lc -lgcc -lgcc_s_asneeded /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o] ==> linker [/sbin/ld]
+        link line: [/sbin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/cc92grpF.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_140e1 /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o -lgcc -lgcc_s_asneeded -latomic_asneeded -lc -lgcc -lgcc_s_asneeded /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o] ==> linker architecture flags [-m;elf]
+        ignore line: [/sbin/ld -plugin /usr/lib/gcc/x86_64-pc-linux-gnu/16/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-pc-linux-gnu/16/lto-wrapper -plugin-opt=-fresolution=/tmp/cc92grpF.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s_asneeded --build-id --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -pie -o cmTC_140e1 /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtbeginS.o -L/usr/lib/gcc/x86_64-pc-linux-gnu/16 -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib -L/lib/../lib -L/usr/lib/../lib -L/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_140e1.dir/CMakeCCompilerABI.c.o -lgcc -lgcc_s_asneeded -latomic_asneeded -lc -lgcc -lgcc_s_asneeded /usr/lib/gcc/x86_64-pc-linux-gnu/16/crtendS.o /usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crtn.o]
         linker tool for 'C': /sbin/ld -m;elf
         collapse obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/Scrt1.o] ==> [/usr/lib/Scrt1.o]
         collapse obj [/usr/lib/gcc/x86_64-pc-linux-gnu/16/../../../../lib/crti.o] ==> [/usr/lib/crti.o]
@@ -1060,7 +1102,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindPkgConfig.cmake:517 (find_program)"
-      - "CMakeLists.txt:31 (find_package)"
+      - "CMakeLists.txt:29 (find_package)"
     mode: "program"
     variable: "PKG_CONFIG_EXECUTABLE"
     description: "pkg-config executable"
@@ -1076,6 +1118,7 @@ events:
       - "pkg-config"
       - "pkgconf"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -1103,11 +1146,14 @@ events:
       - "/opt/sbin/"
       - "/opt/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/pkg-config"
+      - "/home/robot/.gemini/antigravity-ide/bin/pkgconf"
       - "/home/robot/bin/pkg-config"
       - "/home/robot/bin/pkgconf"
     found: "/sbin/pkg-config"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -1134,7 +1180,7 @@ events:
       - "/usr/share/cmake/Modules/FindPkgConfig.cmake:811 (_pkg_find_libs)"
       - "/usr/share/cmake/Modules/FindPkgConfig.cmake:1149 (_pkg_recalculate)"
       - "/usr/share/cmake/Modules/FindPkgConfig.cmake:1166 (_pkg_check_modules_internal)"
-      - "CMakeLists.txt:34 (pkg_check_modules)"
+      - "CMakeLists.txt:32 (pkg_check_modules)"
     mode: "library"
     variable: "pkgcfg_lib_RAYLIB_raylib"
     description: "Path to a library."
@@ -1153,6 +1199,7 @@ events:
     found: "/usr/lib/libraylib.so"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -1178,7 +1225,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindOpenGL.cmake:408 (find_path)"
-      - "CMakeLists.txt:47 (find_package)"
+      - "CMakeLists.txt:45 (find_package)"
     mode: "path"
     variable: "OPENGL_INCLUDE_DIR"
     description: "Path to a file."
@@ -1193,6 +1240,7 @@ events:
     names:
       - "GL/gl.h"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -1218,6 +1266,7 @@ events:
       - "/usr/openwin/share/include/"
       - "/opt/graphics/OpenGL/include/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/GL/gl.h"
       - "/home/robot/bin/GL/gl.h"
       - "/sbin/GL/gl.h"
       - "/usr/bin/GL/gl.h"
@@ -1232,6 +1281,7 @@ events:
     found: "/usr/include/"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -1257,7 +1307,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindOpenGL.cmake:414 (find_path)"
-      - "CMakeLists.txt:47 (find_package)"
+      - "CMakeLists.txt:45 (find_package)"
     mode: "path"
     variable: "OPENGL_GLX_INCLUDE_DIR"
     description: "Path to a file."
@@ -1272,6 +1322,7 @@ events:
     names:
       - "GL/glx.h"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -1294,6 +1345,7 @@ events:
       - "/opt/"
       - "/usr/include/X11/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/GL/glx.h"
       - "/home/robot/bin/GL/glx.h"
       - "/sbin/GL/glx.h"
       - "/usr/bin/GL/glx.h"
@@ -1308,6 +1360,7 @@ events:
     found: "/usr/include/"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -1333,7 +1386,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindOpenGL.cmake:415 (find_path)"
-      - "CMakeLists.txt:47 (find_package)"
+      - "CMakeLists.txt:45 (find_package)"
     mode: "path"
     variable: "OPENGL_EGL_INCLUDE_DIR"
     description: "Path to a file."
@@ -1348,6 +1401,7 @@ events:
     names:
       - "EGL/egl.h"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -1370,6 +1424,7 @@ events:
       - "/opt/"
       - "/usr/include/X11/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/EGL/egl.h"
       - "/home/robot/bin/EGL/egl.h"
       - "/sbin/EGL/egl.h"
       - "/usr/bin/EGL/egl.h"
@@ -1384,6 +1439,7 @@ events:
     found: "/usr/include/"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -1409,7 +1465,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindOpenGL.cmake:416 (find_path)"
-      - "CMakeLists.txt:47 (find_package)"
+      - "CMakeLists.txt:45 (find_package)"
     mode: "path"
     variable: "OPENGL_GLES2_INCLUDE_DIR"
     description: "Path to a file."
@@ -1424,6 +1480,7 @@ events:
     names:
       - "GLES2/gl2.h"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -1446,6 +1503,7 @@ events:
       - "/opt/"
       - "/usr/include/X11/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/GLES2/gl2.h"
       - "/home/robot/bin/GLES2/gl2.h"
       - "/sbin/GLES2/gl2.h"
       - "/usr/bin/GLES2/gl2.h"
@@ -1460,6 +1518,7 @@ events:
     found: "/usr/include/"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -1485,7 +1544,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindOpenGL.cmake:417 (find_path)"
-      - "CMakeLists.txt:47 (find_package)"
+      - "CMakeLists.txt:45 (find_package)"
     mode: "path"
     variable: "OPENGL_GLES3_INCLUDE_DIR"
     description: "Path to a file."
@@ -1500,6 +1559,7 @@ events:
     names:
       - "GLES3/gl3.h"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -1522,6 +1582,7 @@ events:
       - "/opt/"
       - "/usr/include/X11/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/GLES3/gl3.h"
       - "/home/robot/bin/GLES3/gl3.h"
       - "/sbin/GLES3/gl3.h"
       - "/usr/bin/GLES3/gl3.h"
@@ -1536,6 +1597,7 @@ events:
     found: "/usr/include/"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -1561,7 +1623,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindOpenGL.cmake:418 (find_path)"
-      - "CMakeLists.txt:47 (find_package)"
+      - "CMakeLists.txt:45 (find_package)"
     mode: "path"
     variable: "OPENGL_xmesa_INCLUDE_DIR"
     description: "Path to a file."
@@ -1576,6 +1638,7 @@ events:
     names:
       - "GL/xmesa.h"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -1601,6 +1664,7 @@ events:
       - "/usr/openwin/share/include/"
       - "/opt/graphics/OpenGL/include/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/GL/xmesa.h"
       - "/home/robot/bin/GL/xmesa.h"
       - "/sbin/GL/xmesa.h"
       - "/usr/bin/GL/xmesa.h"
@@ -1628,6 +1692,7 @@ events:
     found: false
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -1653,7 +1718,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindOpenGL.cmake:424 (find_path)"
-      - "CMakeLists.txt:47 (find_package)"
+      - "CMakeLists.txt:45 (find_package)"
     mode: "path"
     variable: "OPENGL_GLU_INCLUDE_DIR"
     description: "Path to a file."
@@ -1668,6 +1733,7 @@ events:
     names:
       - "GL/glu.h"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -1690,6 +1756,7 @@ events:
       - "/opt/"
       - "/usr/include/X11/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/GL/glu.h"
       - "/home/robot/bin/GL/glu.h"
       - "/sbin/GL/glu.h"
       - "/usr/bin/GL/glu.h"
@@ -1704,6 +1771,7 @@ events:
     found: "/usr/include/"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -1729,7 +1797,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindOpenGL.cmake:438 (find_library)"
-      - "CMakeLists.txt:47 (find_package)"
+      - "CMakeLists.txt:45 (find_package)"
     mode: "library"
     variable: "OPENGL_opengl_LIBRARY"
     description: "Path to a library."
@@ -1744,6 +1812,7 @@ events:
     names:
       - "OpenGL"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -1766,6 +1835,7 @@ events:
       - "/opt/"
       - "/usr/lib/X11/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -1780,6 +1850,7 @@ events:
     found: "/usr/lib/libOpenGL.so"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -1805,7 +1876,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindOpenGL.cmake:443 (find_library)"
-      - "CMakeLists.txt:47 (find_package)"
+      - "CMakeLists.txt:45 (find_package)"
     mode: "library"
     variable: "OPENGL_glx_LIBRARY"
     description: "Path to a library."
@@ -1820,6 +1891,8 @@ events:
     names:
       - "GLX"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/libglvnd/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/libglvnd/"
       - "/home/robot/bin/"
       - "/sbin/libglvnd/"
@@ -1863,6 +1936,8 @@ events:
       - "/usr/lib/X11/libglvnd/"
       - "/usr/lib/X11/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/libglvnd/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/libglvnd/"
       - "/home/robot/bin/"
       - "/sbin/libglvnd/"
@@ -1889,6 +1964,7 @@ events:
     found: "/usr/lib/libGLX.so"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -1914,7 +1990,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindOpenGL.cmake:449 (find_library)"
-      - "CMakeLists.txt:47 (find_package)"
+      - "CMakeLists.txt:45 (find_package)"
     mode: "library"
     variable: "OPENGL_egl_LIBRARY"
     description: "Path to a library."
@@ -1929,6 +2005,8 @@ events:
     names:
       - "EGL"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/libglvnd/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/libglvnd/"
       - "/home/robot/bin/"
       - "/sbin/libglvnd/"
@@ -1972,6 +2050,8 @@ events:
       - "/usr/lib/X11/libglvnd/"
       - "/usr/lib/X11/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/libglvnd/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/libglvnd/"
       - "/home/robot/bin/"
       - "/sbin/libglvnd/"
@@ -1998,6 +2078,7 @@ events:
     found: "/usr/lib/libEGL.so"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -2023,7 +2104,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindOpenGL.cmake:455 (find_library)"
-      - "CMakeLists.txt:47 (find_package)"
+      - "CMakeLists.txt:45 (find_package)"
     mode: "library"
     variable: "OPENGL_gles2_LIBRARY"
     description: "Path to a library."
@@ -2038,6 +2119,7 @@ events:
     names:
       - "GLESv2"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -2060,6 +2142,7 @@ events:
       - "/opt/"
       - "/usr/lib/X11/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -2074,6 +2157,7 @@ events:
     found: "/usr/lib/libGLESv2.so"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -2099,7 +2183,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindOpenGL.cmake:460 (find_library)"
-      - "CMakeLists.txt:47 (find_package)"
+      - "CMakeLists.txt:45 (find_package)"
     mode: "library"
     variable: "OPENGL_gles3_LIBRARY"
     description: "Path to a library."
@@ -2115,6 +2199,7 @@ events:
       - "GLESv3"
       - "GLESv2"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -2137,6 +2222,7 @@ events:
       - "/opt/"
       - "/usr/lib/X11/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -2158,6 +2244,7 @@ events:
       - "/opt/lib/"
       - "/opt/"
       - "/usr/lib/X11/"
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -2172,6 +2259,7 @@ events:
     found: "/usr/lib/libGLESv2.so"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
@@ -2197,7 +2285,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/usr/share/cmake/Modules/FindOpenGL.cmake:466 (find_library)"
-      - "CMakeLists.txt:47 (find_package)"
+      - "CMakeLists.txt:45 (find_package)"
     mode: "library"
     variable: "OPENGL_glu_LIBRARY"
     description: "Path to a library."
@@ -2213,6 +2301,7 @@ events:
       - "GLU"
       - "MesaGLU"
     candidate_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -2238,6 +2327,7 @@ events:
       - "/usr/openwin/lib/"
       - "/usr/shlib/"
     searched_directories:
+      - "/home/robot/.gemini/antigravity-ide/bin/"
       - "/home/robot/bin/"
       - "/sbin/"
       - "/usr/bin/"
@@ -2252,6 +2342,7 @@ events:
     found: "/usr/lib/libGLU.so"
     search_context:
       ENV{PATH}:
+        - "/home/robot/.gemini/antigravity-ide/bin"
         - "/home/robot/bin"
         - "/sbin"
         - "/usr/bin"
