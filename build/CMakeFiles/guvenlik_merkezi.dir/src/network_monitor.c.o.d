@@ -86,4 +86,4 @@ CMakeFiles/guvenlik_merkezi.dir/src/network_monitor.c.o: \
  /usr/include/netpacket/packet.h /usr/include/fcntl.h \
  /usr/include/bits/fcntl.h /usr/include/bits/fcntl-linux.h \
  /usr/include/bits/cloexec.h /usr/include/bits/stat.h \
- /usr/include/bits/struct_stat.h
+ /usr/include/bits/struct_stat.h /usr/include/sys/stat.h

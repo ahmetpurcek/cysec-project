@@ -94,5 +94,36 @@ int  arp_spoof_get_target_count(void);
 void enable_ip_forward(void);
 void disable_ip_forward(void);
 
+/* IPv6 (NDP) spoof desteği */
+void enable_ipv6_forward(void);
+void disable_ipv6_forward(void);
+
+/* ===== Tek kare dissect (yalıtılmış birim testi için) ===== */
+int  full_monitor_dissect_frame(int datalink_type, const unsigned char *data,
+                                int caplen, PacketRecord *out);
+
+/* ===== PCAP disk kaydı ===== */
+int  full_monitor_pcap_record_start(const char *path);
+void full_monitor_pcap_record_stop(void);
+int  full_monitor_pcap_record_is_active(void);
+void full_monitor_pcap_record_path(char *out, int max_len);
+unsigned long long full_monitor_pcap_record_bytes(void);
+
+/* ===== SPAN / mirror tespiti ===== */
+int  full_monitor_get_foreign_frame_count(void);
+int  full_monitor_mirror_suspected(void);
+/* Yakalama arayuzunun kendi MAC'i ("aa:bb:cc:dd:ee:ff"), bilinmiyorsa bos */
+int  full_monitor_own_mac(char *out, int max_len);
+
+/* ===== Cihaz aktivite takibi ===== */
+int  full_monitor_device_active(const char *ip, const char *mac, double window_sec);
+/* Son 12 aktivite dilimini virgülle ayrılmış olarak döndürür: "ip|mac|proto,ip|mac|proto,..." */
+int  full_monitor_activity_slots(char *out, int max_len);
+
+/* ===== ARP spoof watchdog / son görülme ===== */
+double arp_spoof_target_last_seen(const char *ip);
+
 #endif /* NETWORK_MONITOR_H */
+
+
 

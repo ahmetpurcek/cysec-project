@@ -12,10 +12,20 @@
 #include "gui.h"
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 int main(int argc, char *argv[]) {
     printf("=== Akilli Sehir Guvenlik Merkezi ===\n");
     printf("Platform: %s\n", PLATFORM_NAME);
+
+    /* Paket yakalama (pcap), ARP spoof ve NDP zehirleme root gerektirir */
+    if (geteuid() != 0) {
+        fprintf(stderr,
+                "UYARI: Root olarak calismiyorsunuz!\n"
+                "Paket yakalama, ARP spoof ve NDP islemleri root yetkisi "
+                "ister.\n"
+                "Tum ozellikler icin: sudo ./run-root.sh\n");
+    }
 
     /* Platform başlat */
     if (platform_init() != 0) {

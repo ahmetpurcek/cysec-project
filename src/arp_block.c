@@ -22,7 +22,6 @@
 #include <string.h>
 #include <time.h>
 
-#ifdef PLATFORM_LINUX
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -32,7 +31,6 @@
 #include <net/if.h>
 #include <netpacket/packet.h>
 #include <net/ethernet.h>
-#endif
 
 /* ================= İç durum ================= */
 
@@ -40,7 +38,6 @@
 #define BLOCK_TICK_MS          150     /* işçi döngü adımı */
 #define BLOCK_RESTORE_COUNT    3       /* geri alırken gönderilecek paket sayısı */
 
-#ifdef PLATFORM_LINUX
 
 typedef struct {
     char            ip[MAX_IP_LEN];
@@ -568,4 +565,3 @@ int arp_block_engine_ok(void) {
     return g_engine_ok;
 }
 
-#endif /* PLATFORM_LINUX */

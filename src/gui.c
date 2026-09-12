@@ -60,6 +60,8 @@ static int g_nm_auto_scroll = 1;        /* 1=en altta, otomatik kaydir */
 static char g_pkt_filter[256];         /* display filtre ifadesi (Paket Izleme) */
 static char g_pkt_filter_prev[256];    /* onceki ifade: degisiklik algilamak icin */
 static int g_pkt_filter_active = 0;    /* filtre kutusu odakli mi (metin girisi) */
+static int g_nm_hide_own_arp = 1;      /* kendi (spoof) ARP trafigini gizle (varsayilan acik) */
+static int g_pcap_rec_fail = 0;        /* PCAP kayit baslatma hatasi (geri bildirim) */
 
 static Font g_custom_font = {0};
 static float g_ui_scale = 1.0f;
@@ -609,6 +611,7 @@ static void draw_panel_dashboard(int W, int H) {
 static void capture_stop_all(void) {
   if (arp_spoof_is_running()) arp_spoof_stop();
   full_monitor_stop();
+  full_monitor_pcap_record_stop();
   full_monitor_clear();
   g_capture_active_ip[0] = '\0';
   g_capture_all = 0;
@@ -1154,7 +1157,25 @@ static void draw_panel_tools(int W, int H) {
          (g_capture_active_ip[0] && g_nm_target[0] &&
           strcmp(g_capture_active_ip, g_nm_target) == 0));
 
-    int cy = py + 28;
+    int cy = py + 44;
+
+    /* --- Mod gostergesi (pcap / procfs / kapali) --- */
+    {
+      int mode = full_monitor_get_mode();
+      const char *mstr = (mode == 2) ? "PCAP" : (mode == 1) ? "PROCFS" : "KAPALI";
+      Color mc = (mode == 2) ? COLOR_GREEN
+                : (mode == 1) ? COLOR_AMBER
+                : (Color){96, 104, 128, 255};
+      draw_led(30, cy + 6, 4, mc, mode != 0);
+      DrawTextC("Mod:", 40, cy + 1, 9, COLOR_TEXT_DIM);
+      DrawTextC(mstr, 40 + MeasureText("Mod:", 9) + 8, cy + 1, 9, mc);
+      char ownm[MAX_MAC_LEN];
+      if (full_monitor_own_mac(ownm, sizeof(ownm)) == 0) {
+        DrawTextC(ownm, ctrl_w - MeasureText(ownm, 7) - 24, cy + 3, 7,
+                  COLOR_TEXT_DIM);
+      }
+      cy += 18;
+    }
 
     /* --- Hedef IP secimi (scrollable liste) --- */
     DrawTextC("Hedef:", 24, cy, 10, COLOR_TEXT_SEC);
@@ -1257,10 +1278,71 @@ static void draw_panel_tools(int W, int H) {
     DrawRectangle(24, cy, ctrl_w - 40, 1, ui_alpha(COLOR_BORDER, 140));
     cy += 8;
 
+    /* --- Kendi ARP trafigini gizle (toggle) + PCAP disk kaydi --- */
+    if (capture_for_this) {
+      Rectangle tog = {24, cy, ctrl_w - 40, 20};
+      int th = CheckCollisionPointRec(GetMousePosition(), tog);
+      Rectangle box = {28, cy + 5, 10, 10};
+      if (g_nm_hide_own_arp) {
+        DrawRectangleRounded(box, 0.25f, 4, COLOR_GREEN);
+        /* Tik isareti (font ASCII sinirinda, cizgi ile ciz) */
+        DrawLine((int)box.x + 2, (int)box.y + 6, (int)box.x + 5,
+                 (int)box.y + 9, (Color){10, 14, 24, 255});
+        DrawLine((int)box.x + 5, (int)box.y + 9, (int)box.x + 9,
+                 (int)box.y + 3, (Color){10, 14, 24, 255});
+      } else {
+        DrawRectangleRoundedLinesEx(box, 0.25f, 4, 1.0f,
+                                    ui_alpha(COLOR_BORDER, 150));
+      }
+      DrawTextC("Kendi ARP trafigini gizle", 44, cy + 4, 9,
+                th ? COLOR_TEXT : COLOR_TEXT_SEC);
+      if (th && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        g_nm_hide_own_arp = !g_nm_hide_own_arp;
+      cy += 24;
+
+      if (full_monitor_pcap_record_is_active()) {
+        draw_led(32, cy + 9, 4, COLOR_RED, 1);
+        if (GuiButton((Rectangle){44, cy, 96, 22}, "Kaydi Durdur")) {
+          full_monitor_pcap_record_stop();
+          g_pcap_rec_fail = 0;
+        }
+        unsigned long long rb = full_monitor_pcap_record_bytes();
+        snprintf(buf, sizeof(buf), "%.1f KB", rb / 1024.0);
+        DrawTextC(buf, 44 + 102, cy + 6, 9, COLOR_GREEN);
+        char pp[200];
+        full_monitor_pcap_record_path(pp, sizeof(pp));
+        DrawTextC(pp[0] ? pp : "/tmp/guvenlik_merkezi.pcap", 24, cy + 24, 7,
+                  COLOR_TEXT_DIM);
+        cy += 36;
+      } else {
+        if (GuiButton((Rectangle){24, cy, ctrl_w - 40, 22}, "PCAP Kaydet")) {
+          if (full_monitor_pcap_record_start("/tmp/guvenlik_merkezi.pcap") != 0)
+            g_pcap_rec_fail = 1;
+          else
+            g_pcap_rec_fail = 0;
+        }
+        DrawTextC("Izleme aktifken tum trafigi .pcap dosyasina kaydeder", 24,
+                  cy + 24, 7, COLOR_TEXT_DIM);
+        if (g_pcap_rec_fail) {
+          DrawTextC("Kayit icin once bir izleme baslatin!", 24, cy + 34, 7,
+                    COLOR_RED);
+          cy += 44;
+        } else {
+          cy += 32;
+        }
+      }
+      cy += 8;
+    }
+
     /* --- Yakalanan paket ozeti --- */
     static PacketRecord nm_all_packets[2048];
     static PacketRecord nm_dev_packets[1024];
     int nm_dpc = 0;
+
+    /* Kendi (spoof) ARP trafigini gizleme icin kendi MAC'imiz */
+    char own_mac_buf[MAX_MAC_LEN] = "";
+    int have_own_mac =
+        (full_monitor_own_mac(own_mac_buf, sizeof(own_mac_buf)) == 0);
 
     if (capture_for_this && (g_capture_all || g_nm_target[0])) {
       int c = full_monitor_get_packets(nm_all_packets, 2048, 0);
@@ -1268,11 +1350,17 @@ static void draw_panel_tools(int W, int H) {
       if (g_capture_all) {
         /* Tum ag modu: IP filtresi yok */
         for (int i = 0; i < c && nm_dpc < 1024; i++) {
+          if (g_nm_hide_own_arp && have_own_mac &&
+              strcmp(nm_all_packets[i].src_mac, own_mac_buf) == 0)
+            continue;
           if (filter_engine_packet_matches(&nm_all_packets[i], g_pkt_filter))
             nm_dev_packets[nm_dpc++] = nm_all_packets[i];
         }
       } else {
         for (int i = 0; i < c; i++) {
+          if (g_nm_hide_own_arp && have_own_mac &&
+              strcmp(nm_all_packets[i].src_mac, own_mac_buf) == 0)
+            continue;
           if ((strcmp(nm_all_packets[i].src_ip, g_nm_target) == 0 ||
                strcmp(nm_all_packets[i].dst_ip, g_nm_target) == 0 ||
                strcmp(nm_all_packets[i].src_mac, g_nm_target) == 0 ||
@@ -1298,16 +1386,55 @@ static void draw_panel_tools(int W, int H) {
 
     /* Sol panel alt bilgi alani (paket turu legendi) */
     if (capture_for_this) {
-      int ly = py + panel_h - 74;
+      int ly = py + panel_h - 100;
       DrawRectangle(24, ly, ctrl_w - 40, 1, ui_alpha(COLOR_BORDER, 120));
-      DrawTextC("PROTO", 24, ly + 8, 8, COLOR_TEXT_DIM);
+      DrawTextC("AKTIVITE (son 12)", 24, ly + 8, 8, COLOR_TEXT_DIM);
+
+      char slots[512];
+      int nslots = full_monitor_activity_slots(slots, sizeof(slots));
+      static const char *atoks[12];
+      int nt = 0;
+      {
+        char *p = slots;
+        while (p && *p && nt < 12) {
+          char *comma = strchr(p, ',');
+          if (comma) *comma = '\0';
+          if (*p) atoks[nt++] = p;
+          if (!comma) break;
+          p = comma + 1;
+        }
+      }
+      /* En yeni aktivite sagda olacak sekilde 12 nokta */
+      for (int i = 0; i < 12; i++) {
+        int idx = nt - 1 - i;
+        int sx = 24 + i * 14 + 3;
+        Color sc = (Color){44, 50, 68, 255};
+        if (idx >= 0) {
+          const char *pr = atoks[idx] ? strrchr(atoks[idx], '|') : NULL;
+          pr = pr ? pr + 1 : "";
+          sc = (idx < nslots) ? proto_color(pr) : (Color){44, 50, 68, 255};
+        }
+        DrawCircle(sx, ly + 22, 3.5f, sc);
+      }
+      if (nt > 0 && atoks[0]) {
+        char ipx[128];
+        size_t plen = strcspn(atoks[0], "|");
+        if (plen >= sizeof(ipx)) plen = sizeof(ipx) - 1;
+        memcpy(ipx, atoks[0], plen);
+        ipx[plen] = '\0';
+        snprintf(buf, sizeof(buf), "son: %s (aktif %d)", ipx, nslots);
+        DrawTextC(buf, 24, ly + 30, 7, COLOR_TEXT_DIM);
+      }
+
+      /* PROTO legend */
+      DrawTextC("PROTO", 24, ly + 46, 8, COLOR_TEXT_DIM);
       const char *pl[] = {"TCP", "UDP", "DNS", "ARP", "ICMP"};
       Color pc[] = {COLOR_CYAN, COLOR_ACCENT2, COLOR_GREEN, COLOR_AMBER,
                     COLOR_RED};
       int px2 = 24;
       for (int p = 0; p < 5; p++) {
-        DrawCircle(px2 + 3, ly + 25, 2.5f, pc[p]);
-        DrawTextC(pl[p], px2 + 9, ly + 19, 8, COLOR_TEXT_SEC);
+        DrawCircle(px2 + 3, ly + 63, 2.5f, pc[p]);
+        DrawTextC(pl[p], px2 + 9, ly + 57, 8, COLOR_TEXT_SEC);
         px2 += MeasureText(pl[p], 8) + 20;
         if (px2 > ctrl_w - 30)
           break;
@@ -1326,6 +1453,13 @@ static void draw_panel_tools(int W, int H) {
       draw_panel_title(rx + 12, py + 8, buf, 13, COLOR_ACCENT);
     } else {
       draw_panel_title(rx + 12, py + 8, "Paket Listesi", 13, COLOR_ACCENT);
+    }
+    /* SPAN / port mirror tespiti: yabanci MAC kaynakli kareler yuksekse uyar */
+    if (capture_for_this && full_monitor_mirror_suspected()) {
+      char mbuf[96];
+      snprintf(mbuf, sizeof(mbuf), "MIRROR? yabanci:%d",
+               full_monitor_get_foreign_frame_count());
+      draw_badge(rx + 150, py + 7, mbuf, 8, COLOR_AMBER);
     }
     if (g_selected_packet_num != -1) {
       Rectangle back_btn = {rx + result_w - 80, py + 5, 70, 18};

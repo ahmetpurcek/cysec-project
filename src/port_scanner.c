@@ -979,17 +979,11 @@ static int g_initialized     = 0;
 
 /* ========== Zamanlama ========== */
 static double _get_time_ms(void) {
-#ifdef PLATFORM_LINUX
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-#else
-    LARGE_INTEGER freq, cnt;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&cnt);
-    return (double)cnt.QuadPart * 1000.0 / (double)freq.QuadPart;
-#endif
 }
+
 
 /* ========== Yardımcı ========== */
 static int _rand_range(int min, int max) {
@@ -1055,12 +1049,8 @@ static int _tcp_connect_scan(uint32_t ip, int port,
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) return 0;
 
-#ifdef PLATFORM_LINUX
     int fl = fcntl(sock, F_GETFL, 0);
     fcntl(sock, F_SETFL, fl | O_NONBLOCK);
-#else
-    u_long mode = 1; ioctlsocket(sock, FIONBIO, &mode);
-#endif
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -1071,23 +1061,13 @@ static int _tcp_connect_scan(uint32_t ip, int port,
     double t0 = _get_time_ms();
     int rc = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     if (rc != 0) {
-#ifdef PLATFORM_LINUX
         if (errno != EINPROGRESS) { closesocket(sock); return 0; }
-#else
-        if (WSAGetLastError() != WSAEWOULDBLOCK) { closesocket(sock); return 0; }
-#endif
     }
 
     /* Timeout: base + speed * 150 ms (turbo modda daha kısa) */
     int tmo = PS_TIMEOUT_BASE + (g_stealth.scan_speed * 150);
-#ifdef PLATFORM_LINUX
     struct pollfd pf = { sock, POLLOUT, 0 };
     rc = poll(&pf, 1, tmo);
-#else
-    fd_set wset; FD_ZERO(&wset); FD_SET(sock, &wset);
-    struct timeval tv = { tmo / 1000, (tmo % 1000) * 1000 };
-    rc = select(0, NULL, &wset, NULL, &tv);
-#endif
     *rtt = _get_time_ms() - t0;
 
     if (rc <= 0) { closesocket(sock); return 0; }
@@ -1097,14 +1077,10 @@ static int _tcp_connect_scan(uint32_t ip, int port,
     if (err) { closesocket(sock); return 0; }
 
     /* Bloklama moduna geri al + recv timeout */
-#ifdef PLATFORM_LINUX
     fcntl(sock, F_SETFL, fl);
     struct timeval rtv = { 1, 200000 };
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
-#else
-    u_long bm = 0; ioctlsocket(sock, FIONBIO, &bm);
-    int t = 1200; setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&t, sizeof(t));
-#endif
+    u_long bm = 0; ioctl(sock, FIONBIO, &bm);
 
     /* Banner al */
     if (banner && banner_sz > 0) {
@@ -1127,19 +1103,16 @@ static int _tcp_connect_scan(uint32_t ip, int port,
 
     /* TTL al (Linux'ta) */
     *ttl = 0;
-#ifdef PLATFORM_LINUX
     {
         int tv2 = 0; socklen_t tl = sizeof(tv2);
         getsockopt(sock, IPPROTO_IP, IP_TTL, &tv2, &tl);
         *ttl = tv2;
     }
-#endif
     closesocket(sock);
     return 1;
 }
 
 /* ========== SYN / Stealth Scan (raw socket, sadece Linux) ========== */
-#ifdef PLATFORM_LINUX
 static uint16_t _cksum(void *buf, int len) {
     uint32_t s = 0; uint16_t *p = (uint16_t *)buf;
     while (len > 1) { s += *p++; len -= 2; }
@@ -1283,7 +1256,6 @@ static int _raw_tcp_scan(uint32_t target_ip, int port, int tcp_flags, int frag,
         return 0;
     }
 }
-#endif /* PLATFORM_LINUX */
 
 /* ========== UDP Scan ========== */
 static int _udp_scan(uint32_t ip, int port, double *rtt) {
@@ -1293,10 +1265,8 @@ static int _udp_scan(uint32_t ip, int port, double *rtt) {
     struct sockaddr_in a; memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET; a.sin_port = htons((uint16_t)port);
     a.sin_addr.s_addr = ip;
-#ifdef PLATFORM_LINUX
     struct timeval tv = { 2, 0 };
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-#endif
     char probe[8] = {0};
     double t0 = _get_time_ms();
     sendto(s, probe, 8, 0, (struct sockaddr *)&a, sizeof(a));
@@ -1327,7 +1297,6 @@ static void *_worker(void *arg) {
         case PS_SCAN_CONNECT:
             st = _tcp_connect_scan(w->ip, port, banner, sizeof(banner), &rtt, &ttl, product, sizeof(product));
             break;
-#ifdef PLATFORM_LINUX
         case PS_SCAN_SYN:      st = _raw_tcp_scan(w->ip, port, TF_SYN,              0, &rtt, &ttl); break;
         case PS_SCAN_SYN_FRAG: st = _raw_tcp_scan(w->ip, port, TF_SYN,              1, &rtt, &ttl); break;
         case PS_SCAN_FIN:      st = _raw_tcp_scan(w->ip, port, TF_FIN,              0, &rtt, &ttl); break;
@@ -1336,7 +1305,6 @@ static void *_worker(void *arg) {
         case PS_SCAN_ACK:      st = _raw_tcp_scan(w->ip, port, TF_ACK,              0, &rtt, &ttl); break;
         case PS_SCAN_WINDOW:   st = _raw_tcp_scan(w->ip, port, TF_ACK,              0, &rtt, &ttl); break;
         case PS_SCAN_MAIMON:   st = _raw_tcp_scan(w->ip, port, TF_FIN|TF_ACK,       0, &rtt, &ttl); break;
-#endif
         case PS_SCAN_UDP: st = _udp_scan(w->ip, port, &rtt); break;
         default:
             st = _tcp_connect_scan(w->ip, port, banner, sizeof(banner), &rtt, &ttl, product, sizeof(product));
@@ -1452,12 +1420,7 @@ static void *_scan_manager(void *arg) {
     }
 
     for (int i = 0; i < tc; i++) {
-#ifdef PLATFORM_LINUX
         pthread_join(threads[i], NULL);
-#else
-        WaitForSingleObject(threads[i], INFINITE);
-        CloseHandle(threads[i]);
-#endif
     }
 
     platform_mutex_lock(&g_results.lock);

