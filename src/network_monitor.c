@@ -1833,8 +1833,12 @@ int full_monitor_get_packets(PacketRecord *out, int max_count, int offset) {
     platform_mutex_lock(&global_lock);
     int avail = packet_count;  /* buffer'da mevcut paket sayısı (max PACKET_BUFFER_SIZE) */
     int count = (avail < max_count) ? avail : max_count;
-    /* En eski paketten başla: write_idx - packet_count konumu */
-    int start = (write_idx - avail + PACKET_BUFFER_SIZE) % PACKET_BUFFER_SIZE;
+    /* En YENI count paketi döndür (canlı görünüm). Eski kod "write_idx - avail"
+     * ile EN ESKİ 2048'e kilitleniyordu: buffer 2048'i aşınca GUI yeni
+     * paketlere hiç ulaşamıyor, ring kaydıkça penceredeki hedef satırları
+     * boşalıp liste tamamen kayboluyor, sonra pencere bir sonraki yoğun
+     * bölgeye gelince topluca geri geliyordu. */
+    int start = (write_idx - count + PACKET_BUFFER_SIZE) % PACKET_BUFFER_SIZE;
     for (int i = 0; i < count; i++) {
         out[i] = packet_buffer[(start + i) % PACKET_BUFFER_SIZE];
     }
@@ -1846,14 +1850,20 @@ int full_monitor_get_filtered(PacketRecord *out, int max_count, const char *filt
     if (!out || max_count <= 0 || !filter_proto) return 0;
     platform_mutex_lock(&global_lock);
     int avail = packet_count;
-    int start = (write_idx - avail + PACKET_BUFFER_SIZE) % PACKET_BUFFER_SIZE;
+    int newest = (write_idx - 1 + PACKET_BUFFER_SIZE) % PACKET_BUFFER_SIZE;
     int found = 0;
-    for (int i = 0; i < avail && found < max_count; i++) {
-        PacketRecord *p = &packet_buffer[(start + i) % PACKET_BUFFER_SIZE];
+    /* En yeni eslesmeler oncelikli: yeniden eskiye tara */
+    for (int k = 0; k < avail && found < max_count; k++) {
+        PacketRecord *p =
+            &packet_buffer[(newest - k + PACKET_BUFFER_SIZE) % PACKET_BUFFER_SIZE];
         if (strcasecmp(p->protocol, filter_proto) == 0 ||
             strstr(p->protocol, filter_proto)) {
             out[found++] = *p;
         }
+    }
+    /* GUI kronolojik (eski->yeni) sirada bekliyor */
+    for (int a = 0, b = found - 1; a < b; a++, b--) {
+        PacketRecord t = out[a]; out[a] = out[b]; out[b] = t;
     }
     platform_mutex_unlock(&global_lock);
     return found;
@@ -1920,7 +1930,7 @@ void full_monitor_pcap_record_path(char *out, int max_len) {
     if (g_pcap_dump_path[0])
         strncpy(out, g_pcap_dump_path, (size_t)(max_len - 1));
     else
-        out[0] = ' ';
+        out[0] = '\0';
     platform_mutex_unlock(&g_dump_lock);
 }
 

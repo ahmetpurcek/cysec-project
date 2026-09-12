@@ -640,8 +640,10 @@ static void capture_start_for(const char *ip) {
   /* Once varsa eskisini durdur */
   capture_stop_all();
 
-  /* Buffer'i temizle */
-  full_monitor_clear();
+  /* NOT: buffer temizlenmez. Cihaz listesinde tiklama/yeniden secim
+   * sirasinda liste bosalmasin; gecmis gercek paketler korunur ve
+   * gorunum hedef filtresiyle cizilir. Tam silme yalnizca "Temizle"
+   * butonu ile yapilir. */
 
   /* Hedef IP'yi kaydet */
   strncpy(g_capture_active_ip, ip, MAX_IP_LEN - 1);
@@ -1419,16 +1421,23 @@ static void draw_panel_tools(int W, int H) {
       c0 = c;
       /* Display filtre ifadesi de uygulanir (Wireshark tarzi) */
       if (g_capture_all) {
-        /* Tum ag modu: IP filtresi yok */
-        for (int i = 0; i < c && nm_dpc < 1024; i++) {
+        /* Tum ag modu: IP filtresi yok. En YENI 1024 eslesme kalsin:
+         * sondan basa topla, sonra kronolojik siraya dondur. */
+        for (int i = c - 1; i >= 0 && nm_dpc < 1024; i--) {
           if (g_nm_hide_own_arp && have_own_mac &&
               strcmp(nm_all_packets[i].src_mac, own_mac_buf) == 0)
             continue;
           if (filter_engine_packet_matches(&nm_all_packets[i], g_pkt_filter))
             nm_dev_packets[nm_dpc++] = nm_all_packets[i];
         }
+        for (int a = 0, b = nm_dpc - 1; a < b; a++, b--) {
+          PacketRecord t = nm_dev_packets[a];
+          nm_dev_packets[a] = nm_dev_packets[b];
+          nm_dev_packets[b] = t;
+        }
       } else {
-        for (int i = 0; i < c; i++) {
+        /* En YENI 1024 eslesme kalsin: sondan basa topla */
+        for (int i = c - 1; i >= 0 && nm_dpc < 1024; i--) {
           if (g_nm_hide_own_arp && have_own_mac &&
               strcmp(nm_all_packets[i].src_mac, own_mac_buf) == 0)
             continue;
@@ -1437,9 +1446,14 @@ static void draw_panel_tools(int W, int H) {
                strcmp(nm_all_packets[i].src_mac, g_nm_target) == 0 ||
                strcmp(nm_all_packets[i].dst_mac, g_nm_target) == 0) &&
               filter_engine_packet_matches(&nm_all_packets[i], g_pkt_filter)) {
-            if (nm_dpc < 1024)
-              nm_dev_packets[nm_dpc++] = nm_all_packets[i];
+            nm_dev_packets[nm_dpc++] = nm_all_packets[i];
           }
+        }
+        /* Kronolojik siraya dondur (eski->yeni, auto-scroll en altta yeni) */
+        for (int a = 0, b = nm_dpc - 1; a < b; a++, b--) {
+          PacketRecord t = nm_dev_packets[a];
+          nm_dev_packets[a] = nm_dev_packets[b];
+          nm_dev_packets[b] = t;
         }
       }
     }
