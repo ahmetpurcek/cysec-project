@@ -1604,8 +1604,11 @@ static void draw_panel_tools(int W, int H) {
                   COLOR_RED);
       }
 
-      /* Temizle: filtreyi kaldir ve listeyi sifirla */
+      /* Temizle: filtre + scroll/Secim sifirlanir VE paket buffer'i
+       * gercekten bosaltilir (ring + istatistik + aktivite). Aksi halde
+       * buton yalnizca filtre kutusunu temizliyor, liste dolu kaliyordu. */
       if (GuiButton((Rectangle){rx + result_w - 78, fb_y, 70, 24}, "Temizle")) {
+        full_monitor_clear();
         g_pkt_filter[0] = '\0';
         g_pkt_filter_prev[0] = '\0';
         g_pkt_filter_active = 0;
