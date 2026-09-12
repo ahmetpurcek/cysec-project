@@ -1691,8 +1691,17 @@ static void draw_panel_tools(int W, int H) {
           char sbuf[32];
           snprintf(sbuf, sizeof(sbuf), "%d", p->packet_number);
           DrawTextC(sbuf, rx + 8, iy + 3, 9, COLOR_TEXT_DIM);
-          snprintf(sbuf, sizeof(sbuf), "%.2f",
-                   p->timestamp - (int)p->timestamp);
+          /* Gerçek saat (HH:MM:SS): eski kod epoch'un yalnizca saniyelik
+           * kesrini bastigi icin "0.52" gibi anlamsiz sayilar gorunuyordu */
+          {
+            time_t ts = (time_t)p->timestamp;
+            struct tm *lt = localtime(&ts);
+            if (lt)
+              snprintf(sbuf, sizeof(sbuf), "%02d:%02d:%02d",
+                       lt->tm_hour, lt->tm_min, lt->tm_sec);
+            else
+              sbuf[0] = '\0';
+          }
           DrawTextC(sbuf, rx + 36, iy + 3, 9, COLOR_TEXT_SEC);
 
           DrawTextC(p->src_ip[0] ? p->src_ip : p->src_mac, rx + 88, iy + 3, 9,
