@@ -1762,6 +1762,13 @@ static void *monitor_thread(void *arg) {
         if (!g_capture_opened_iface[0] && iface && iface[0])
             strncpy(g_capture_opened_iface, iface, sizeof(g_capture_opened_iface) - 1);
         mirror_init_own_mac(g_capture_opened_iface);
+        /* Sadece GELEN kareleri yakala. MITM aktifken ip_forward ile
+         * ilettigimiz kopyalar TX olarak ikinci kez listeye dusmesin;
+         * boylece her gercek paket tam 1 kez gorunur, MIRROR/yabanci
+         * sayaci yalnizca gercekten yabanci kareleri sayar. */
+        if (pcap_setdirection(handle, PCAP_D_IN) == -1) {
+            fprintf(stderr, "[FULL_MONITOR] pcap_setdirection(IN) desteklenmiyor — TX kareleri de listelenecek\n");
+        }
         pcap_setnonblock(handle, 1, errbuf);
 
         fprintf(stderr, "[FULL_MONITOR] Capture started (datalink=%d)\n", dlt);
