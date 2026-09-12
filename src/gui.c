@@ -612,7 +612,8 @@ static void capture_stop_all(void) {
   if (arp_spoof_is_running()) arp_spoof_stop();
   full_monitor_stop();
   full_monitor_pcap_record_stop();
-  full_monitor_clear();
+  /* DURDURMA PAKETLERI SILMEZ: kullanici trafigi durdurup geriye donuk
+     inceleme yapabilsin. Buffer'lar Temizle butonu ile ayrıca silinir. */
   g_capture_active_ip[0] = '\0';
   g_capture_all = 0;
   g_capture_iface[0] = '\0';
@@ -628,6 +629,8 @@ static void capture_start_all(void) {
      gorunmez. */
   strncpy(g_capture_iface, g_scan.local_iface, MAX_IFACE_LEN - 1);
   full_monitor_start(g_scan.local_iface[0] ? g_scan.local_iface : NULL);
+  arp_spoof_sync_partners(NULL, 0, NULL, NULL, NULL);
+  arp_spoof_set_full_mitm(0);
   if (g_scan.gateway_ip[0] && g_scan.local_iface[0]) {
     arp_spoof_start_all(g_scan.gateway_ip, g_scan.local_iface);
   }
@@ -647,10 +650,19 @@ static void capture_start_for(const char *ip) {
   strncpy(g_capture_iface, g_scan.local_iface, MAX_IFACE_LEN - 1);
   full_monitor_start(g_scan.local_iface[0] ? g_scan.local_iface : NULL);
 
-  /* Yerel cihaz degilse ARP spoof baslat */
+  /* Yerel cihaz degilse ARP spoof baslat.
+   * TAM MITM: hedefin LAN'daki diger TUM cihazlarla olan trafigi de
+   * bizden gecsin (hedef <-> partner 2 yonlu zehirleme). Boylece hedef
+   * TV'ye, laptop'a vs. ne gonderiyorsa paketleri gorunur olur. */
   int is_local = (strcmp(ip, g_scan.local_ip) == 0);
   if (!is_local && g_scan.gateway_ip[0] && g_scan.local_iface[0]) {
+    arp_spoof_sync_partners(g_scan.devices, g_scan.device_count,
+                            ip, g_scan.local_ip, g_scan.gateway_ip);
+    arp_spoof_set_full_mitm(1);
     arp_spoof_start(ip, g_scan.gateway_ip, g_scan.local_iface);
+  } else {
+    arp_spoof_sync_partners(NULL, 0, NULL, NULL, NULL);
+    arp_spoof_set_full_mitm(0);
   }
 }
 
@@ -1157,6 +1169,10 @@ static void draw_panel_tools(int W, int H) {
          (g_capture_active_ip[0] && g_nm_target[0] &&
           strcmp(g_capture_active_ip, g_nm_target) == 0));
 
+    /* Paket listesi gosterim karari: izleme DURDURULDUKTAN sonra da
+       (IP secimi degismedigi surece) buffer'daki paketler gorunsun. */
+    int show_packets = (g_capture_all || g_nm_target[0]);
+
     int cy = py + 44;
 
     /* --- Mod gostergesi (pcap / procfs / kapali) --- */
@@ -1275,6 +1291,59 @@ static void draw_panel_tools(int W, int H) {
       cy += 30;
     }
 
+    /* --- MITM / ARP spoof saglik paneli (root, forward, zehirleme durumu) --- */
+    if (capture_for_this || g_capture_all) {
+      int spoof_on = arp_spoof_is_running();
+      int mitm = arp_spoof_get_full_mitm();
+      int pcount = arp_spoof_get_partner_count();
+      int fwd4 = arp_spoof_ip_forward_status();
+      int fwd6 = arp_spoof_ipv6_forward_status();
+      int wlan = (g_scan.local_iface[0] == 'w' && g_scan.local_iface[1] == 'l');
+
+      DrawRectangle(24, cy, ctrl_w - 40, 1, ui_alpha(COLOR_BORDER, 140));
+      cy += 8;
+
+      if (spoof_on) {
+        draw_led(30, cy + 7, 3, COLOR_GREEN, 1);
+        DrawTextC("ARP SPOOF: AKTIF", 38, cy + 2, 9, COLOR_GREEN);
+      } else {
+        draw_led(30, cy + 7, 3, COLOR_RED, 1);
+        DrawTextC("ARP SPOOF: KAPALI", 38, cy + 2, 9, COLOR_RED);
+      }
+      cy += 16;
+
+      if (mitm) {
+        snprintf(buf, sizeof(buf), "TAM MITM: hedef <-> %d cihaz zehirli", pcount);
+        DrawTextC(buf, 24, cy, 8, COLOR_CYAN);
+      } else if (g_capture_all) {
+        snprintf(buf, sizeof(buf), "%d cihaz gateway uzerinden zehirli",
+                 arp_spoof_get_target_count());
+        DrawTextC(buf, 24, cy, 8, COLOR_TEXT_SEC);
+      }
+      cy += 14;
+
+      snprintf(buf, sizeof(buf), "IP forward: v4 %s | v6 %s",
+               fwd4 == 1 ? "ACIK" : (fwd4 == 0 ? "KAPALI" : "?"),
+               fwd6 == 1 ? "ACIK" : (fwd6 == 0 ? "KAPALI" : "?"));
+      DrawTextC(buf, 24, cy, 8, fwd4 == 1 ? COLOR_TEXT_SEC : COLOR_AMBER);
+      cy += 14;
+
+      if (!spoof_on) {
+        DrawTextC("Root / cap_net_raw gerekli - ARP spoof acilamadi.", 24, cy,
+                  8, COLOR_RED);
+        cy += 14;
+      }
+      if (wlan) {
+        DrawTextC("Wi-Fi yonetim modu: karsi cihaz kareleri 1'e 1 gorunmez!",
+                  24, cy, 8, COLOR_AMBER);
+        cy += 14;
+        DrawTextC("Ethernet + SPAN/rogue AP onerilir.", 24, cy, 8,
+                  COLOR_TEXT_DIM);
+        cy += 14;
+      }
+      cy += 4;
+    }
+
     DrawRectangle(24, cy, ctrl_w - 40, 1, ui_alpha(COLOR_BORDER, 140));
     cy += 8;
 
@@ -1344,8 +1413,10 @@ static void draw_panel_tools(int W, int H) {
     int have_own_mac =
         (full_monitor_own_mac(own_mac_buf, sizeof(own_mac_buf)) == 0);
 
-    if (capture_for_this && (g_capture_all || g_nm_target[0])) {
+    int c0 = 0;
+    if (show_packets) {
       int c = full_monitor_get_packets(nm_all_packets, 2048, 0);
+      c0 = c;
       /* Display filtre ifadesi de uygulanir (Wireshark tarzi) */
       if (g_capture_all) {
         /* Tum ag modu: IP filtresi yok */
@@ -1373,19 +1444,24 @@ static void draw_panel_tools(int W, int H) {
       }
     }
 
-    if (capture_for_this) {
+    if (show_packets) {
       draw_dot_label(24, cy, COLOR_GREEN, "Toplam: ", 10, COLOR_TEXT_DIM);
-      snprintf(buf, sizeof(buf), "%d paket (filtreye uyan)", nm_dpc);
+      snprintf(buf, sizeof(buf), "%d paket", nm_dpc);
+      if (g_pkt_filter[0]) snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " (filtre)");
       int d = MeasureText("Toplam: ", 10);
       DrawTextC(buf, 24 + d + 10, cy, 10, COLOR_GREEN);
+      if (!capture_for_this) {
+        char st[128];
+        snprintf(st, sizeof(st), "DURDURULDU - buffer korundu (%d kalan)", c0);
+        DrawTextC(st, 24, cy + 12, 8, COLOR_AMBER);
+      }
     } else if (g_nm_target[0]) {
-      /* Sadece IP seciliyken ama izleme baslatilmamissa goster */
       DrawTextC("Izleme baslatilmadi.", 24, cy, 10, COLOR_TEXT_DIM);
     }
     cy += 24;
 
     /* Sol panel alt bilgi alani (paket turu legendi) */
-    if (capture_for_this) {
+    if (show_packets) {
       int ly = py + panel_h - 100;
       DrawRectangle(24, ly, ctrl_w - 40, 1, ui_alpha(COLOR_BORDER, 120));
       DrawTextC("AKTIVITE (son 12)", 24, ly + 8, 8, COLOR_TEXT_DIM);

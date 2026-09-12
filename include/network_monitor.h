@@ -94,6 +94,17 @@ int  arp_spoof_get_target_count(void);
 void enable_ip_forward(void);
 void disable_ip_forward(void);
 
+/* Tam MITM (full mesh): tek hedef izlerken hedefin tum LAN partnerleriyle
+ * trafigini de ele gecir (hedef <-> partner 2 yonlu ARP zehirleme) */
+void arp_spoof_sync_partners(const Device *devices, int count,
+                             const char *target_ip, const char *local_ip,
+                             const char *gateway_ip);
+void arp_spoof_set_full_mitm(int enabled);
+int  arp_spoof_get_full_mitm(void);
+int  arp_spoof_get_partner_count(void);
+int  arp_spoof_ip_forward_status(void);
+int  arp_spoof_ipv6_forward_status(void);
+
 /* IPv6 (NDP) spoof desteği */
 void enable_ipv6_forward(void);
 void disable_ipv6_forward(void);

