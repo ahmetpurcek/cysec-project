@@ -1,4 +1,4 @@
-# Siber Güvenlik Merkezi (AkilliSehirGuvenlik)
+# Siber Güvenlik Merkezi
 
 > Raylib tabanlı, tek pencereden ağ keşfi, port taraması, canlı trafik izleme ve saldırı tespiti (IDS) sunan C11 güvenlik aracı.  
 > **Sadece Linux üzerinde çalışır.** (Arch, BlackArch, Kali, Parrot, Ubuntu/Debian, Fedora)
