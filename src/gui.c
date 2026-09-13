@@ -57,6 +57,10 @@ static float g_scroll_blk = 0;           /* engellenen cihazlar listesi scroll *
 static char g_nm_target[MAX_IP_LEN] = {0}; /* network monitor secili hedef */
 static int g_nm_prev_packet_count = 0;  /* auto-scroll icin onceki paket sayisi */
 static int g_nm_auto_scroll = 1;        /* 1=en altta, otomatik kaydir */
+static int g_nm_match_total = 0;        /* monotonik: listeye giren toplam satir */
+static int g_nm_last_seen_pno = -1;     /* en yuksek gorulen packet_number */
+static int g_nm_flow_paused = 0;        /* Paket Izleme akis kilidi (izleme SURUYOR) */
+static int g_nm_flow_dirty = 1;         /* kilitli akis tek seferlik yenilensin mi */
 static char g_pkt_filter[256];         /* display filtre ifadesi (Paket Izleme) */
 static char g_pkt_filter_prev[256];    /* onceki ifade: degisiklik algilamak icin */
 static int g_pkt_filter_active = 0;    /* filtre kutusu odakli mi (metin girisi) */
@@ -162,15 +166,18 @@ static Color proto_color(const char *proto) {
   return COLOR_TEXT;
 }
 
-static void draw_custom_scrollbar(float x, float y, float w, float view_h,
-                                  float content_h, float *scroll) {
+/* Donus: 1 -> kullanici bu karede cubugu surukledi. Cagri tarafi
+ * auto-scroll durumunu buna gore gunceller. */
+static int draw_custom_scrollbar(float x, float y, float w, float view_h,
+                                 float content_h, float *scroll) {
   if (content_h <= view_h)
-    return;
+    return 0;
   float max_scroll = content_h - view_h;
   float thumb = view_h * (view_h / content_h);
   if (thumb < 20)
     thumb = 20;
 
+  int dragged = 0;
   Rectangle track = {x, y, w, view_h};
   if (CheckCollisionPointRec(GetMousePosition(), track)) {
     if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
@@ -181,6 +188,7 @@ static void draw_custom_scrollbar(float x, float y, float w, float view_h,
       if (percent > 1.0f)
         percent = 1.0f;
       *scroll = percent * max_scroll;
+      dragged = 1;
     }
   }
 
@@ -188,6 +196,7 @@ static void draw_custom_scrollbar(float x, float y, float w, float view_h,
   DrawRectangleRounded(track, 0.5f, 4, (Color){20, 28, 44, 60});
   DrawRectangleRounded((Rectangle){x, thumb_y, w, thumb}, 0.5f, 4,
                        COLOR_SCROLLBAR);
+  return dragged;
 }
 
 /* Panel basligi: vurgu cizgisi + baslik (SOC tutarli gorunum) */
@@ -301,8 +310,8 @@ static void draw_tabs(int W) {
     }
     if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
       g_active_tab = i;
-      /* Tab degisince aktif izlemeyi durdur */
-      if (g_capture_active_ip[0] || g_capture_all) capture_stop_all();
+      /* Sekme degisimi aktif oturumu DURDURMAZ: pcap + IDS + (aciksa)
+       * ARP spoof/MITM aynen surer; durdurma yalnizca Durdur butonunda. */
       if (i == TAB_DASHBOARD) {
         g_selected_device_ip[0] = '\0';
         g_scroll_devices = 0;
@@ -494,19 +503,11 @@ static void draw_panel_dashboard(int W, int H) {
 
     if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
       if (is_sel) {
-        /* Cihaz deselect — aktif izleme varsa durdur */
-        if (g_capture_active_ip[0] &&
-            strcmp(g_capture_active_ip, d->ip) == 0) {
-          capture_stop_all();
-        }
+        /* Cihaz deselect — izleme Alarm Merkezi'nden yonetilir, burada durmaz */
         g_selected_device_ip[0] = '\0';
         g_selected_packet_num = -1;
       } else {
-        /* Baska cihaz secildi — eski izleme varsa durdur */
-        if (g_capture_active_ip[0] &&
-            strcmp(g_capture_active_ip, g_selected_device_ip) == 0) {
-          capture_stop_all();
-        }
+        /* Baska cihaz secildi — izleme Alarm Merkezi'nden yonetilir, burada durmaz */
         strncpy(g_selected_device_ip, d->ip, MAX_IP_LEN - 1);
         g_scroll_device_detail = 0;
         g_selected_packet_num = -1;
@@ -617,6 +618,9 @@ static void capture_stop_all(void) {
   g_capture_active_ip[0] = '\0';
   g_capture_all = 0;
   g_capture_iface[0] = '\0';
+  /* Paket Izleme akis kilidi pasif duruma doner, listeye yansir */
+  g_nm_flow_paused = 0;
+  g_nm_flow_dirty = 1;
 }
 
 /* Tum ag izleme: full_monitor + gateway ARP spoof (tum cihazlar) */
@@ -832,7 +836,10 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
       g_selected_packet_num = -1;
       g_scroll_nm_flows = 0;
       g_nm_prev_packet_count = 0;
+      g_nm_match_total = 0;
+      g_nm_last_seen_pno = -1;
       g_nm_auto_scroll = 1;
+      g_nm_flow_dirty = 1;
       g_tools_subtab = 0;
       g_active_tab = TAB_TOOLS;
     }
@@ -1240,15 +1247,15 @@ static void draw_panel_tools(int W, int H) {
       DrawTextC(g_scan.devices[i].ip, db.x + 10, db.y + 4, 10,
                 sel ? COLOR_ACCENT : COLOR_TEXT);
       if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        /* Yeni cihaz secildiginde eski izlemeyi durdur */
-        if (g_nm_target[0] && strcmp(g_nm_target, g_scan.devices[i].ip) != 0) {
-          if (g_capture_active_ip[0] || g_capture_all) capture_stop_all();
-        }
+        /* Hedef degisti: izleme SURUYOR, yalnizca gorunum filtresi degisir */
         strncpy(g_nm_target, g_scan.devices[i].ip, MAX_IP_LEN - 1);
         g_selected_packet_num = -1;
         g_nm_prev_packet_count = 0;
+        g_nm_match_total = 0;
+        g_nm_last_seen_pno = -1;
         g_nm_auto_scroll = 1;
         g_scroll_nm_flows = 0;
+        g_nm_flow_dirty = 1;
       }
     }
     EndScissorMode();
@@ -1260,37 +1267,28 @@ static void draw_panel_tools(int W, int H) {
     DrawRectangle(24, cy, ctrl_w - 40, 1, ui_alpha(COLOR_BORDER, 140));
     cy += 8;
 
-    /* --- Trafik Yakala / Durdur kontrolleri --- */
-    if (g_capture_all) {
+    /* --- Paket akisi kontrolleri (izleme yalnizca Alarm Merkezi'nden durur) --- */
+    if (g_capture_all || g_capture_active_ip[0]) {
       draw_led(30, cy + 8, 4, COLOR_GREEN, 1);
-      DrawTextC("Tum Ag Izleniyor", 38, cy + 3, 10, COLOR_GREEN);
+      DrawTextC("Trafik Izleniyor", 38, cy + 3, 10, COLOR_GREEN);
+      DrawTextC(g_capture_all ? "Tum Ag" : g_nm_target,
+                38 + MeasureText("Trafik Izleniyor", 10) + 10, cy + 3, 10,
+                COLOR_TEXT_SEC);
       cy += 18;
-      if (GuiButton((Rectangle){24, cy, ctrl_w - 40, 26}, "Durdur")) {
-        capture_stop_all();
-        capture_for_this = 0;
+      if (GuiButton((Rectangle){24, cy, ctrl_w - 40, 26},
+                    g_nm_flow_paused ? "Devam Et" : "Durdur")) {
+        g_nm_flow_paused = !g_nm_flow_paused;
+        g_nm_flow_dirty = 1;
       }
       cy += 30;
     } else if (g_nm_target[0] == '\0') {
       DrawTextC("Bir hedef IP secin.", 24, cy + 4, 11, COLOR_TEXT_DIM);
       cy += 20;
-    } else if (capture_for_this) {
-      /* Aktif izleme */
-      draw_led(30, cy + 8, 4, COLOR_GREEN, 1);
-      DrawTextC("Izleniyor", 38, cy + 3, 10, COLOR_GREEN);
-      DrawTextC(g_nm_target, 98, cy + 3, 10, COLOR_TEXT_SEC);
-      cy += 18;
-      if (GuiButton((Rectangle){24, cy, ctrl_w - 40, 26}, "Durdur")) {
-        capture_stop_all();
-        capture_for_this = 0;
-      }
-      cy += 30;
     } else {
-      /* Pasif */
-      if (GuiButton((Rectangle){24, cy, ctrl_w - 40, 26}, "Trafik Yakala")) {
-        capture_start_for(g_nm_target);
-        capture_for_this = 1;
-      }
-      cy += 30;
+      /* Izleme pasif - Alarm Merkezi > TUM AGI IZLE ile baslatin */
+      DrawTextC("Izleme pasif - Alarm Merkezi > TUM AGI IZLE ile baslatin.", 24,
+                cy + 4, 9, COLOR_TEXT_DIM);
+      cy += 20;
     }
 
     /* --- MITM / ARP spoof saglik paneli (root, forward, zehirleme durumu) --- */
@@ -1408,7 +1406,7 @@ static void draw_panel_tools(int W, int H) {
     /* --- Yakalanan paket ozeti --- */
     static PacketRecord nm_all_packets[2048];
     static PacketRecord nm_dev_packets[1024];
-    int nm_dpc = 0;
+    static int nm_dpc = 0;
 
     /* Kendi (spoof) ARP trafigini gizleme icin kendi MAC'imiz */
     char own_mac_buf[MAX_MAC_LEN] = "";
@@ -1416,13 +1414,16 @@ static void draw_panel_tools(int W, int H) {
         (full_monitor_own_mac(own_mac_buf, sizeof(own_mac_buf)) == 0);
 
     int c0 = 0;
-    if (show_packets) {
+    /* Durdur tusu akisi dondurur: kilitliyken yalnizca dirty=1 ise bir kez
+     * yenile; diger karelerde ring buffer'a dokunulmaz. */
+    if (show_packets && (!g_nm_flow_paused || g_nm_flow_dirty)) {
+      g_nm_flow_dirty = 0;
       int c = full_monitor_get_packets(nm_all_packets, 2048, 0);
       c0 = c;
       /* Display filtre ifadesi de uygulanir (Wireshark tarzi) */
-      if (g_capture_all) {
-        /* Tum ag modu: IP filtresi yok. En YENI 1024 eslesme kalsin:
-         * sondan basa topla, sonra kronolojik siraya dondur. */
+      if (!g_nm_target[0]) {
+        /* Hedef secilmemis: tum ag, IP filtresi yok. En YENI 1024 eslesme
+         * kalsin: sondan basa topla, sonra kronolojik siraya dondur. */
         for (int i = c - 1; i >= 0 && nm_dpc < 1024; i--) {
           if (g_nm_hide_own_arp && have_own_mac &&
               strcmp(nm_all_packets[i].src_mac, own_mac_buf) == 0)
@@ -1436,7 +1437,7 @@ static void draw_panel_tools(int W, int H) {
           nm_dev_packets[b] = t;
         }
       } else {
-        /* En YENI 1024 eslesme kalsin: sondan basa topla */
+        /* Secili hedef IP eslesmeleri: En YENI 1024 eslesme kalsin */
         for (int i = c - 1; i >= 0 && nm_dpc < 1024; i--) {
           if (g_nm_hide_own_arp && have_own_mac &&
               strcmp(nm_all_packets[i].src_mac, own_mac_buf) == 0)
@@ -1458,13 +1459,34 @@ static void draw_panel_tools(int W, int H) {
       }
     }
 
+    /* Monotonik satir sayaci: buffer dolunca nm_dpc 1024'te doyar; yeni
+     * satirlari packet_number ile say. Icerik buyumeye devam eder (scrollbar
+     * dogru kuculur) ve satir konumlari sabit kalir. */
+    if (show_packets && nm_dpc > 0) {
+      int top_pno = nm_dev_packets[nm_dpc - 1].packet_number;
+      if (g_nm_last_seen_pno < 0 || top_pno < g_nm_last_seen_pno) {
+        g_nm_match_total = nm_dpc; /* yeni capture / hedef / filtre */
+      } else if (top_pno > g_nm_last_seen_pno) {
+        int newn = 0;
+        for (int i = nm_dpc - 1;
+             i >= 0 && nm_dev_packets[i].packet_number > g_nm_last_seen_pno;
+             i--)
+          newn++;
+        g_nm_match_total += newn;
+      }
+      g_nm_last_seen_pno = top_pno;
+    }
+
     if (show_packets) {
       draw_dot_label(24, cy, COLOR_GREEN, "Toplam: ", 10, COLOR_TEXT_DIM);
       snprintf(buf, sizeof(buf), "%d paket", nm_dpc);
       if (g_pkt_filter[0]) snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " (filtre)");
       int d = MeasureText("Toplam: ", 10);
       DrawTextC(buf, 24 + d + 10, cy, 10, COLOR_GREEN);
-      if (!capture_for_this) {
+      if (g_nm_flow_paused) {
+        DrawTextC("AKIS DURAKLATILDI - izleme arka planda suruyor", 24,
+                  cy + 12, 8, COLOR_AMBER);
+      } else if (!capture_for_this) {
         char st[128];
         snprintf(st, sizeof(st), "DURDURULDU - buffer korundu (%d kalan)", c0);
         DrawTextC(st, 24, cy + 12, 8, COLOR_AMBER);
@@ -1536,11 +1558,11 @@ static void draw_panel_tools(int W, int H) {
     DrawRoundedPanel((Rectangle){rx, py, result_w, panel_h}, COLOR_PANEL,
                      ui_alpha(COLOR_BORDER, 150));
 
-    if (g_capture_all) {
-      draw_panel_title(rx + 12, py + 8, "Trafik: Tum Ag", 13, COLOR_ACCENT);
-    } else if (g_nm_target[0]) {
+    if (g_nm_target[0]) {
       snprintf(buf, sizeof(buf), "Trafik: %s", g_nm_target);
       draw_panel_title(rx + 12, py + 8, buf, 13, COLOR_ACCENT);
+    } else if (g_capture_all) {
+      draw_panel_title(rx + 12, py + 8, "Trafik: Tum Ag", 13, COLOR_ACCENT);
     } else {
       draw_panel_title(rx + 12, py + 8, "Paket Listesi", 13, COLOR_ACCENT);
     }
@@ -1595,6 +1617,9 @@ static void draw_panel_tools(int W, int H) {
         g_scroll_nm_flows = 0;
         g_nm_auto_scroll = 1;
         g_nm_prev_packet_count = 0;
+        g_nm_match_total = 0;
+        g_nm_last_seen_pno = -1;
+        g_nm_flow_dirty = 1;
       }
 
       /* Gecersiz ifade: kirmizi cerceve + panel usti uyari yazisi */
@@ -1615,8 +1640,11 @@ static void draw_panel_tools(int W, int H) {
         g_scroll_nm_flows = 0;
         g_nm_auto_scroll = 1;
         g_nm_prev_packet_count = 0;
+        g_nm_match_total = 0;
+        g_nm_last_seen_pno = -1;
         g_selected_packet_num = -1;
         g_scroll_pdu_detail = 0;
+        g_nm_flow_dirty = 1;
       }
 
       tbl_y += 32; /* filtre cubugunun altindan tablo baslar */
@@ -1643,7 +1671,7 @@ static void draw_panel_tools(int W, int H) {
                   COLOR_TEXT_SEC);
       } else {
         int lh = panel_h - (tbl_y - py) - 4;
-        float ms = nm_dpc * 18 - lh;
+        float ms = g_nm_match_total * 18 - lh;
         if (ms < 0)
           ms = 0;
 
@@ -1664,17 +1692,21 @@ static void draw_panel_tools(int W, int H) {
         }
 
         /* Yeni paket geldiyse ve auto-scroll aktifse en alta kaydir */
-        if (nm_dpc > g_nm_prev_packet_count && g_nm_auto_scroll && ms > 0) {
+        if (g_nm_match_total > g_nm_prev_packet_count &&
+            g_nm_auto_scroll && ms > 0) {
           g_scroll_nm_flows = ms;
         }
         /* En altta olup olmadigini tekrar kontrol et */
         if (g_scroll_nm_flows >= ms - scroll_threshold) {
           g_nm_auto_scroll = 1;
         }
-        g_nm_prev_packet_count = nm_dpc;
+        g_nm_prev_packet_count = g_nm_match_total;
         BeginScissorModeScaled(rx, tbl_y, result_w, lh);
         for (int i = 0; i < nm_dpc; i++) {
-          int iy = tbl_y + i * 18 - (int)g_scroll_nm_flows;
+          /* Satir konumu buffer slotuna degil packet_number'a bagli:
+           * buffer kayarken gorunen satirlar yerinde sabit kalir. */
+          int row_abs = g_nm_match_total - nm_dpc + i;
+          int iy = tbl_y + row_abs * 18 - (int)g_scroll_nm_flows;
           if (iy + 18 < tbl_y || iy > tbl_y + lh)
             continue;
           PacketRecord *p = &nm_dev_packets[i];
@@ -1683,7 +1715,8 @@ static void draw_panel_tools(int W, int H) {
           int hover = CheckCollisionPointRec(GetMousePosition(), pr);
           Color rbg =
               hover ? COLOR_PANEL_HOVER
-                    : ((i % 2 == 0) ? (Color){13, 17, 28, 255} : COLOR_SURFACE);
+                    : ((row_abs % 2 == 0) ? (Color){13, 17, 28, 255}
+                                          : COLOR_SURFACE);
           DrawRectangleRec(pr, rbg);
 
           Color pc = proto_color(p->protocol);
@@ -1736,8 +1769,12 @@ static void draw_panel_tools(int W, int H) {
           }
         }
         EndScissorMode();
-        draw_custom_scrollbar(rx + result_w - 10, tbl_y, 10, lh, nm_dpc * 18,
-                              &g_scroll_nm_flows);
+        if (draw_custom_scrollbar(rx + result_w - 10, tbl_y, 10, lh,
+                                  g_nm_match_total * 18,
+                                  &g_scroll_nm_flows)) {
+          /* Cubuk suruklendi: en altta degilse auto-scroll kapanir */
+          g_nm_auto_scroll = (g_scroll_nm_flows >= ms - scroll_threshold);
+        }
       }
     }
 
