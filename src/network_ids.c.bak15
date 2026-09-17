@@ -288,33 +288,6 @@ typedef struct {
     uint32_t count;
     uint32_t unique[64];       /* farklı hedef/port hash'leri */
     int      unique_len;
-    /* --- [DEGISIKLIK 17] Port alani icin TAM farkli-deger sayimi ---
-     * unique[64] yalnizca RAPOR icin ilk 64 ornegi tutabilir; 64'ten
-     * fazla farkli port goren bir tarama ekranda hep '64 farkli port'
-     * yaziyordu (doyum). Snort sfPortscan / Suricata da ayni yontemi
-     * kullanir: 65536 bitlik bitmap. Tembel ayrilir, 2-3 porta dokunan
-     * normal akis hic bellek harcamaz. */
-    uint8_t *unique_bits;       /* 8192 bayt = 65536 bit (port alani) */
-    uint32_t unique_bits_count; /* isaretli bit sayisi = farkli port sayisi */
-    int      unique_bits_failed;/* 1 = calloc basarisiz, eski davranisa dus */
-    /* --- [DEĞİŞİKLİK 18] UZUN UFUK (yavaş / hız sınırlamalı tarama) ---
-     * Yukaridaki count/unique_* KISA pencereyi (IDS_WINDOW_SEC, tumbling)
-     * temsil eder ve PATLAMA halindeki taramayi yakalar. Yavas tarama
-     * (or. 2 sn/port) hicbir 10 sn'lik pencereye esik dolduracak kadar
-     * farkli port birakmadigi icin GORUNMEZ kaliyordu; asagidaki ikinci
-     * kume, aktivite boslugu ile kapanan bagimsiz bir UZUN UFUK izler.
-     * long_short_hit: ayni ufuk icinde kisa pencere kurali tetiklendiyse
-     * 1 olur ve uzun ufuk susar (ayni olayi iki kez raporlamamak icin). */
-    uint32_t long_count;
-    uint32_t long_unique[64];
-    int      long_unique_len;
-    uint8_t *long_bits;         /* 65536 bit: port alani icin tam sayim */
-    uint32_t long_bits_count;
-    int      long_bits_failed;
-    int      long_short_hit;
-    time_t   long_start;
-    time_t   long_last;
-    time_t   long_last_alert;
     /* --- [DEĞİŞİKLİK 2] Yatay tarama: özel (RFC1918) / genel hedef ayrımı --- */
     uint32_t private_dst_count;
     uint32_t public_dst_count;
@@ -328,46 +301,6 @@ static int g_tracker_count = 0;
 
 static uint32_t ids_hash_unique(uint32_t a, uint32_t b) {
     return a ^ (b * 2654435761u);
-}
-
-/* [DEGISIKLIK 17] Port alani (0..65535) bitmap'i: 65536 bit = 8192 bayt. */
-#define IDS_UNIQUE_BITS_BYTES 8192u
-
-/* ===== [DEĞİŞİKLİK 18] UZUN UFUK AYARLARI ==============================
- * Varsayilanlar header sabitleridir (uretim davranisi). Test/kalibrasyon
- * kancasi bunlari degistirebilir; motor kodu HICBIR yerde sabiti dogrudan
- * kullanmaz, boylece test gercek davranisi olcebilir. */
-static int g_scan_idle_gap   = IDS_SCAN_IDLE_GAP_SEC;
-static int g_scan_window_max = IDS_SCAN_LONG_WINDOW_SEC;
-static int g_scan_min_span   = IDS_SCAN_MIN_SPAN_SEC;
-static int g_scan_long_thr   = IDS_SCAN_LONG_UNIQUE;
-
-void ids_set_scan_window_params(int idle_gap_sec, int max_window_sec,
-                                int min_span_sec, int long_unique_thr) {
-    platform_mutex_lock(&g_ids_lock);
-    if (idle_gap_sec    > 0) g_scan_idle_gap   = idle_gap_sec;
-    if (max_window_sec  > 0) g_scan_window_max = max_window_sec;
-    if (min_span_sec    > 0) g_scan_min_span   = min_span_sec;
-    if (long_unique_thr > 0) g_scan_long_thr   = long_unique_thr;
-    platform_mutex_unlock(&g_ids_lock);
-}
-
-void ids_get_scan_window_params(int *idle_gap_sec, int *max_window_sec,
-                                int *min_span_sec, int *long_unique_thr) {
-    if (idle_gap_sec)    *idle_gap_sec    = g_scan_idle_gap;
-    if (max_window_sec)  *max_window_sec  = g_scan_window_max;
-    if (min_span_sec)    *min_span_sec    = g_scan_min_span;
-    if (long_unique_thr) *long_unique_thr = g_scan_long_thr;
-}
-
-/* Tracker'i sifirlar; bitmap varsa once SERBEST birakir (yoksa geri
- * donusturulen her tracker bellek sizintisi olurdu). */
-static void ids_tracker_clear(IdsTracker *t) {
-    if (t->unique_bits) { free(t->unique_bits); t->unique_bits = NULL; }
-    /* [DEGISIKLIK 18] uzun ufuk bitmap'i de serbest birakilir (yoksa
-     * geri donusturulen her tracker bellek sizintisi olurdu). */
-    if (t->long_bits) { free(t->long_bits); t->long_bits = NULL; }
-    memset(t, 0, sizeof(*t));
 }
 
 static IdsTracker *ids_tracker_get(const char *key) {
@@ -387,14 +320,14 @@ static IdsTracker *ids_tracker_get(const char *key) {
                 if (g_trackers[i].window_start < victim->window_start)
                     victim = &g_trackers[i];
         }
-        ids_tracker_clear(victim);   /* [DEGISIKLIK 17] bitmap'i de birakir */
+        memset(victim, 0, sizeof(*victim));
         strncpy(victim->key, key, sizeof(victim->key) - 1);
         victim->active = 1;
         victim->window_start = time(NULL);
         return victim;
     }
     IdsTracker *t = &g_trackers[g_tracker_count++];
-    ids_tracker_clear(t);
+    memset(t, 0, sizeof(*t));
     strncpy(t->key, key, sizeof(t->key) - 1);
     t->active = 1;
     t->window_start = time(NULL);
@@ -416,12 +349,6 @@ static void ids_tracker_reset_if_expired(IdsTracker *t) {
     if (now - t->window_start > IDS_WINDOW_SEC) {
         t->count = 0;
         t->unique_len = 0;
-        /* [DEGISIKLIK 17] Pencere kapandi: port bitmap'i de sifirlanir,
-         * yoksa onceki pencerenin portlari yeni pencerede sayili kalir. */
-        if (t->unique_bits) {
-            memset(t->unique_bits, 0, IDS_UNIQUE_BITS_BYTES);
-            t->unique_bits_count = 0;
-        }
         t->private_dst_count = 0;   /* [DEĞİŞİKLİK 2] */
         t->public_dst_count = 0;    /* [DEĞİŞİKLİK 2] */
         t->window_start = now;
@@ -438,157 +365,6 @@ static void ids_tracker_bump(IdsTracker *t, uint32_t unique_val) {
         }
         if (!found) t->unique[t->unique_len++] = unique_val;
     }
-}
-
-/* [DEGISIKLIK 17] Ornek dizisinden bitmap'e gecis. Yalnizca 65. farkli
- * port goruldugunde cagrilir; mevcut 64 ornek de bitmap'e islenir ki
- * sayac ilk andan itibaren TAM olsun. */
-static int ids_tracker_bits_alloc(IdsTracker *t) {
-    if (t->unique_bits) return 1;
-    if (t->unique_bits_failed) return 0;
-    t->unique_bits = (uint8_t *)calloc(1, IDS_UNIQUE_BITS_BYTES);
-    if (!t->unique_bits) { t->unique_bits_failed = 1; return 0; }
-    for (int i = 0; i < t->unique_len; i++) {
-        uint32_t v = t->unique[i];
-        if (v >= 65536u) continue;
-        uint8_t bit = (uint8_t)(1u << (v & 7u));
-        if (!(t->unique_bits[v >> 3] & bit)) {
-            t->unique_bits[v >> 3] |= bit;
-            t->unique_bits_count++;
-        }
-    }
-    return 1;
-}
-
-static void ids_tracker_bits_add(IdsTracker *t, uint32_t v) {
-    if (v >= 65536u) return;
-    uint8_t bit = (uint8_t)(1u << (v & 7u));
-    if (!(t->unique_bits[v >> 3] & bit)) {
-        t->unique_bits[v >> 3] |= bit;
-        t->unique_bits_count++;
-    }
-}
-
-/* Port alanli kurallar bunu kullanir: farkli port sayisi 64'u asinca
- * sayac doyuma ugrar DEGIL, TAM saymaya devam eder. */
-static void ids_tracker_bump_port(IdsTracker *t, uint32_t port) {
-    ids_tracker_reset_if_expired(t);
-    t->count++;
-    if (port == 0) return;
-    if (t->unique_bits) { ids_tracker_bits_add(t, port); return; }
-    if (t->unique_len < 64) {
-        for (int i = 0; i < t->unique_len; i++)
-            if (t->unique[i] == port) return;
-        t->unique[t->unique_len++] = port;
-        return;
-    }
-    if (ids_tracker_bits_alloc(t)) ids_tracker_bits_add(t, port);
-}
-
-/* Kural esikleri ve uyari metni icin 'kac FARKLI port goruldu' degeri. */
-static uint32_t ids_tracker_unique(const IdsTracker *t) {
-    return t->unique_bits ? t->unique_bits_count : (uint32_t)t->unique_len;
-}
-
-/* ---- [DEĞİŞİKLİK 18] Uzun ufuk (yavaş tarama) yardımcıları ------------
- * Ufuk "aktivite boşluğu" (idle gap) veya azami ömür dolunca kapanır ve
- * sıfırdan başlar: Zeek flow timeout / Snort sfPortscan watchdog mantığı —
- * kapanış paket SAYISINA değil ZAMANA bağlıdır, yoksa 2 sn aralıklı bir
- * tarama hiçbir pencereye sığmaz. */
-static void ids_tracker_long_reset(IdsTracker *t, time_t now) {
-    t->long_count = 0;
-    t->long_unique_len = 0;
-    if (t->long_bits) {
-        memset(t->long_bits, 0, IDS_UNIQUE_BITS_BYTES);
-        t->long_bits_count = 0;
-    }
-    t->long_short_hit = 0;
-    t->long_start = now;
-    t->long_last  = now;
-}
-
-static void ids_tracker_long_tick(IdsTracker *t) {
-    time_t now = time(NULL);
-    if (t->long_start == 0 || t->long_last == 0) {
-        t->long_start = now;
-        t->long_last  = now;
-        return;
-    }
-    if (now - t->long_last > g_scan_idle_gap ||
-        now - t->long_start >= g_scan_window_max) {
-        ids_tracker_long_reset(t, now);
-    }
-}
-
-/* 65. farkli degerde ornek dizisinden bitmap'e gecis (kisa penceredeki
- * mantigin aynisi): farkli-port sayaci 64'te DOYUMA UGRAMAZ. */
-static int ids_tracker_long_bits_alloc(IdsTracker *t) {
-    if (t->long_bits) return 1;
-    if (t->long_bits_failed) return 0;
-    t->long_bits = (uint8_t *)calloc(1, IDS_UNIQUE_BITS_BYTES);
-    if (!t->long_bits) { t->long_bits_failed = 1; return 0; }
-    for (int i = 0; i < t->long_unique_len; i++) {
-        uint32_t v = t->long_unique[i];
-        if (v >= 65536u) continue;
-        uint8_t bit = (uint8_t)(1u << (v & 7u));
-        if (!(t->long_bits[v >> 3] & bit)) {
-            t->long_bits[v >> 3] |= bit;
-            t->long_bits_count++;
-        }
-    }
-    return 1;
-}
-
-static void ids_tracker_long_bits_add(IdsTracker *t, uint32_t v) {
-    if (v >= 65536u) return;
-    uint8_t bit = (uint8_t)(1u << (v & 7u));
-    if (!(t->long_bits[v >> 3] & bit)) {
-        t->long_bits[v >> 3] |= bit;
-        t->long_bits_count++;
-    }
-}
-
-static void ids_tracker_long_bump(IdsTracker *t, uint32_t v) {
-    time_t now = time(NULL);
-    ids_tracker_long_tick(t);
-    t->long_count++;
-    t->long_last = now;
-    if (v == 0) return;
-    /* IP hedefli kurallarda (ping sweep / ARP taramasi / yatay tarama)
-     * deger 65536'nin uzerindedir; 65536 bitlik bitmap yalnizca PORT alani
-     * icindir. Bu kurallarin esikleri <= 24 farkli deger istedigi icin 64
-     * ornek yeterlidir (bitmap oraya harcanmaz). */
-    if (v >= 65536u) {
-        if (t->long_unique_len < 64) {
-            for (int i = 0; i < t->long_unique_len; i++)
-                if (t->long_unique[i] == v) return;
-            t->long_unique[t->long_unique_len++] = v;
-        }
-        return;
-    }
-    if (t->long_bits) { ids_tracker_long_bits_add(t, v); return; }
-    if (t->long_unique_len < 64) {
-        for (int i = 0; i < t->long_unique_len; i++)
-            if (t->long_unique[i] == v) return;
-        t->long_unique[t->long_unique_len++] = v;
-        return;
-    }
-    if (ids_tracker_long_bits_alloc(t)) ids_tracker_long_bits_add(t, v);
-}
-
-static uint32_t ids_tracker_long_unique(const IdsTracker *t) {
-    return t->long_bits ? t->long_bits_count : (uint32_t)t->long_unique_len;
-}
-
-/* Uzun ufuk tarama kapisi. Uc kosul BIRLIKTE saglanmali:
- *  1) bu ufukta kisa pencere kurali HIC tetiklenmedi (cift rapor yok),
- *  2) uzun ufukta yeterince FARKLI deger goruldu (g_scan_long_thr),
- *  3) gozlem suresi min_span'i gecti, yani tarama gercekten "yavas". */
-static int ids_tracker_long_scan(const IdsTracker *t) {
-    if (t->long_short_hit) return 0;
-    if (ids_tracker_long_unique(t) < (uint32_t)g_scan_long_thr) return 0;
-    if (t->long_last - t->long_start < (time_t)g_scan_min_span) return 0;
-    return 1;
 }
 
 static int ids_tracker_can_alert(IdsTracker *t) {
@@ -783,152 +559,6 @@ static int ids_raise_alert_ev(const char *sig, const char *sev, double score,
 static int ids_raise_alert(const char *sig, const char *sev, double score,
                             const IdsPktInfo *pi, const char *desc) {
     return ids_raise_alert_ev(sig, sev, score, pi, desc, 0);
-}
-
-/* --- [DEĞİŞİKLİK 14] UYARI BİRLEŞTİRME (alert consolidation) ---
- * Bir kural esigi astiginda uyari yayinlanir; ayni saldiri surdugunde
- * IDS_ALERT_COOLDOWN (60 sn) boyunca yeni uyari uretilmez. Bu sirada olay
- * sayaclari buyumeye devam eder ama ESKI davranista uyari metni ILK
- * tetiklenme anindaki kucuk degerlerde donuyordu: GERCEK testte 30 portluk
- * nmap taramasi "8 paket" olarak raporlandi, 1000 portluk tarama da "16
- * paket" gosteriyordu. Analist yanlis buyuklukte olay goruyordu.
- * Gercek SIEM/IDS'lerde (or. Suricata threshold + aggregation) ayni olay
- * tekrar tekrar uretilmek yerine MEVCUT kayda islenir. Bu yardimci,
- * cooldown icinde gelen daha buyuk kaniti ayni uyari kaydina yazar. */
-/* Uyari kaydinin kimligini belirleyen kaynak/hedef IP: ARP'de ham
- * cercevedeki sender/target IP'leri (pi->src_ip/dst_ip ARP'de 0 kalir). */
-static void ids_alert_endpoints(const IdsPktInfo *pi, uint32_t *att,
-                                uint32_t *vic) {
-    *att = pi->src_ip;
-    *vic = pi->dst_ip;
-    if (pi->is_arp) {
-        *att = pi->arp_sender_ip;
-        *vic = pi->arp_target_ip;
-    }
-}
-
-/* Bastirma (dedup) kaydini serbest birakir. Yalnizca "uyari yayinlanamadi
- * VE listede guncellenecek satir yok" durumunda cagrilir. */
-static void ids_dedup_release(const char *sig, uint32_t att, uint32_t vic) {
-    if (!sig) return;
-    char key[96];
-    snprintf(key, sizeof(key), "%s|%u|%u", sig, att, vic);
-    platform_mutex_lock(&g_ids_lock);
-    for (int i = 0; i < g_dedup_count; i++) {
-        if (!g_dedup[i].active) continue;
-        if (strcmp(g_dedup[i].key, key) == 0) {
-            g_dedup[i].active = 0;
-            break;
-        }
-    }
-    platform_mutex_unlock(&g_ids_lock);
-}
-
-/* 1 doner: mevcut uyari satiri guncellendi; 0 doner: eslesen satir yok. */
-static int ids_aggregate_alert(const char *sig, const IdsPktInfo *pi,
-                               const char *desc, uint8_t ev_bits, uint8_t conf) {
-    if (!sig || !desc) return 0;
-    uint32_t att, vic;
-    ids_alert_endpoints(pi, &att, &vic);
-    char satt[46], svic[46];
-    ids_ip_to_str(att, satt, sizeof(satt));
-    ids_ip_to_str(vic, svic, sizeof(svic));
-    /* Satirlar ids_raise_alert_ev() icinde pi->src_ip/pi->dst_ip ile
-     * doldurulur; ARP'de bu iki alan 0.0.0.0 kalir ve ikinci gecis farkli
-     * ARP saldirganlarini karistirirdi -> ARP icin tek gecis. */
-    int two_pass = !pi->is_arp;
-    int found = 0;
-
-    platform_mutex_lock(&g_ids_lock);
-    for (int pass = 0; pass < (two_pass ? 2 : 1) && !found; pass++) {
-        for (int i = g_alert_count - 1; i >= 0; i--) {
-            IdsGuiAlert *a = &g_alert_buf[i];
-            if (strcmp(a->sig_name, sig) != 0) continue;
-            if (strcmp(a->src_ip, satt) != 0) continue;
-            /* pass 0: ayni kaynak + AYNI hedef (eski davranis).
-             * pass 1: ayni kaynak, hedef DEGISTI. Tarama/brute force'da
-             * hedef surekli degistigi icin eski kod (yalnizca pass 0)
-             * hicbir satir bulamiyor ve uyari SESSIZCE kayboluyordu:
-             * dedup anahtari imza+src+dst oldugundan yeni hedefte de
-             * bastirma devredeydi -> ne satir guncelleniyor ne yeni satir
-             * yayinlaniyordu. Gercek pcap tekrar oynatmalarinda
-             * dogrulanmistir. */
-            if (pass == 0 && strcmp(a->dst_ip, svic) != 0) continue;
-            strncpy(a->description, desc, sizeof(a->description) - 1);
-            a->description[sizeof(a->description) - 1] = '\0';
-            if (pass == 1) {
-                strncpy(a->dst_ip, svic, sizeof(a->dst_ip) - 1);
-                a->dst_ip[sizeof(a->dst_ip) - 1] = '\0';
-                a->dst_port = pi->dst_port;
-                a->src_port = pi->src_port;
-            }
-            if (conf > a->confidence) a->confidence = conf;
-            a->evidence_bits |= ev_bits;
-            if (a->confidence >= 40 && strstr(a->fp_reason, "yetersiz kanit"))
-                a->fp_reason[0] = '\0';
-            found = 1;
-            break;
-        }
-    }
-    platform_mutex_unlock(&g_ids_lock);
-    return found;
-}
-
-/* Esik asildi: ilk tetiklenmede yeni uyari yayinla; cooldown/dedup icinde
- * ise mevcut uyariyi guncelle. Uyari SAYISI sismez, metin guncel kalir. */
-static void ids_raise_or_update(const char *sig, const char *sev, double score,
-                                const IdsPktInfo *pi, const char *desc,
-                                uint8_t ev_bits, IdsTracker *t) {
-    uint8_t conf = (ev_bits == 0) ? 100 : ids_calc_confidence(ev_bits, sev);
-    int published = -1;
-
-    /* Kuralin kendi soguma (cooldown) penceresi dolduysa yeni satir yayinla
-     * (ids_tracker_can_alert bu cagrida sogumayi silahlandirir). */
-    if (t && ids_tracker_can_alert(t))
-        published = ids_raise_alert_ev(sig, sev, score, pi, desc, ev_bits);
-    if (published >= 0) return;
-
-    /* Yayinlanamadi. Once olayin MEVCUT satirini guncellemeyi dene. */
-    if (ids_aggregate_alert(sig, pi, desc, ev_bits, conf)) return;
-
-    /* Ne yayin ne guncellenecek satir var: bastirma (dedup) devrede ama
-     * olay kaydi listede yok (liste temizlenmis / kapasite nedeniyle en
-     * eski kayit dusmus). Eski kod bu durumda uyariyi SESSIZCE
-     * KAYBEDIYORDU; olay hala surerken tespit kaydinin bulunmasi gerektigi
-     * icin bastirma serbest birakilir ve olay yeniden yayinlanir. */
-    uint32_t att, vic;
-    ids_alert_endpoints(pi, &att, &vic);
-    ids_dedup_release(sig, att, vic);
-    if (ids_raise_alert_ev(sig, sev, score, pi, desc, ev_bits) >= 0) return;
-    /* Son care: motor durdurulmus olabilir (g_ids.running == 0). */
-    ids_aggregate_alert(sig, pi, desc, ev_bits, conf);
-}
-
-/* [DEGISIKLIK 18] Uzun ufuk uyarisi. ids_raise_or_update() ile AYNI uc
- * adimli mantigi kullanir (yayinla -> mevcut satiri guncelle -> bastirmayi
- * serbest birakip yeniden yayinla), ancak AYRI bir soguma alani
- * (long_last_alert) tutar: kisa pencerenin sogumasi uzun ufkun raporunu
- * geciktirmemeli, tersi de olmamali. */
-static void ids_raise_or_update_long(const char *sig, const char *sev,
-                                     double score, const IdsPktInfo *pi,
-                                     const char *desc, uint8_t ev_bits,
-                                     IdsTracker *t) {
-    uint8_t conf = (ev_bits == 0) ? 100 : ids_calc_confidence(ev_bits, sev);
-    time_t now = time(NULL);
-    if (t && now - t->long_last_alert >= IDS_ALERT_COOLDOWN) {
-        t->long_last_alert = now;
-        if (ids_raise_alert_ev(sig, sev, score, pi, desc, ev_bits) >= 0)
-            return;
-    }
-    /* Yayinlanamadi: olayin MEVCUT satirini guncellemeyi dene. */
-    if (ids_aggregate_alert(sig, pi, desc, ev_bits, conf)) return;
-    /* Ne yayin ne guncellenecek satir var (liste temizlenmis / dusmus):
-     * bastirmayi serbest birakip olayi yeniden yayinla (sessiz kayip yok). */
-    uint32_t att, vic;
-    ids_alert_endpoints(pi, &att, &vic);
-    ids_dedup_release(sig, att, vic);
-    if (ids_raise_alert_ev(sig, sev, score, pi, desc, ev_bits) >= 0) return;
-    ids_aggregate_alert(sig, pi, desc, ev_bits, conf);
 }
 
 /* ==================================================================
@@ -2397,7 +2027,7 @@ static void ids_malport_feed(const IdsPktInfo *pi) {
         IdsTracker *st = ids_tracker_peek(sk);
         if (st) {
             ids_tracker_reset_if_expired(st);
-            if (ids_tracker_unique(st) >= 8) return;   /* [17] tam sayac */
+            if (st->unique_len >= 8) return;
         }
     }
 
@@ -2561,9 +2191,7 @@ static void ids_check_rules(const IdsPktInfo *pi) {
         t = ids_tracker_get(key);
         if (t) {
             ids_tracker_bump(t, pi->arp_target_ip);
-            ids_tracker_long_bump(t, pi->arp_target_ip);   /* [18] uzun ufuk */
-            if (t->count >= 20 && t->unique_len >= 8) {
-                t->long_short_hit = 1;   /* [18] kisa pencere yakaladi */
+            if (t->count >= 20 && t->unique_len >= 8 && ids_tracker_can_alert(t)) {
                 char desc[160];
                 char m[32];
                 snprintf(m, sizeof(m), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -2573,27 +2201,8 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                 snprintf(desc, sizeof(desc),
                          "%s -> %u farkli IP'ye ARP istegi (%u paket) - ag kesfi",
                          m, t->unique_len, t->count);
-                /* Tarama surerken sayilar buyur: metin guncel kalir. */
-                ids_raise_or_update("ARP Taramasi (Ag Kesfi)", "ORTA",
-                                    SCORE_ORTA, pi, desc, 0, t);
-            }
-            /* [DEĞİŞİKLİK 18] Yavas ARP sweep: 10 sn'de 8 farkli hedef
-             * esigini hicbir pencere karşılamasa bile 24+ farkli hedefe
-             * yayilan ARP istekleri ag kesfi sayilir. */
-            if (ids_tracker_long_scan(t)) {
-                char ldesc[192];
-                char lm[32];
-                snprintf(lm, sizeof(lm), "%02x:%02x:%02x:%02x:%02x:%02x",
-                         pi->arp_sender_mac[0], pi->arp_sender_mac[1],
-                         pi->arp_sender_mac[2], pi->arp_sender_mac[3],
-                         pi->arp_sender_mac[4], pi->arp_sender_mac[5]);
-                snprintf(ldesc, sizeof(ldesc),
-                         "%s -> %u farkli IP'ye YAVAS ARP istegi "
-                         "(%u paket, %d sn) - hiz sinirlamali ag kesfi",
-                         lm, ids_tracker_long_unique(t), t->long_count,
-                         (int)(t->long_last - t->long_start));
-                ids_raise_or_update_long("Yavas ARP Taramasi (Ag Kesfi)",
-                                         "ORTA", SCORE_ORTA, pi, ldesc, 0, t);
+                ids_raise_alert("ARP Taramasi (Ag Kesfi)", "ORTA",
+                                SCORE_ORTA, pi, desc);
             }
         }
     }
@@ -2618,56 +2227,24 @@ static void ids_check_rules(const IdsPktInfo *pi) {
             snprintf(key, sizeof(key), "S|%u", pi->src_ip);
             t = ids_tracker_get(key);
             if (t) {
-                ids_tracker_bump_port(t, pi->dst_port);
-                ids_tracker_long_bump(t, pi->dst_port);   /* [18] uzun ufuk */
-                /* [DEĞİŞİKLİK 10 + 14] Esik adaptif: kucuk aglarda (am=1.0)
-                 * eski davranis, buyuk aglarda daha fazla kanit beklenir.
-                 *
-                 * PASIF KURAL — BILINCLI OLARAK MUHAFAZAKAR: bu kural
-                 * LAN'daki DIGER hostlarin disariya SYN davranisini
-                 * yakalar. Kendi makinemizin taramalari bu kapiya hic
-                 * girmez; onlari ids_check_local_scan() (L| kurali)
-                 * yakalar. Ayirt edici sinyal "kac FARKLI porta" oldugu
-                 * dogru, ancak tek basina 8 farkli porta 10 sn icinde SYN
-                 * gonderen mesru uygulamalar da vardir (cok baglantili
-                 * istemciler, yuk guncelleme paralelligi); yalnizca
-                 * unique_len esigi ile uyarilamak yanlis pozitifi —
-                 * kullanicinin birincil sikayetini — dogrudan artirir ve
-                 * canli trafikte dogrulanmamis bir degisiklik olurdu.
-                 * Bu yuzden hem paket sayisi hem farkli port sayisi
-                 * yuksek olmali (kanitli, eski esik korunur).
-                 * BILINEN SINIRLAMA: 10 sn'lik pencerede 8-19 farkli porta
-                 * dokunan kisa dis taramalar bu kurala takilmaz; boyle bir
-                 * trafik ancak L| kapsamina girerse (yerel kaynak) veya
-                 * akis analizinin tarama/sweep skoru ile (ozet skor, uyari
-                 * listesi degil) gorunur. */
-                if (t->count >= (uint32_t)(20 * am) &&
-                    ids_tracker_unique(t) >= 8) {
-                    t->long_short_hit = 1;   /* [18] kisa pencere yakaladi */
+                ids_tracker_bump(t, pi->dst_port);
+                /* [DEĞİŞİKLİK 10 + 14] Eşik adaptif: küçük ağlarda (m=1.0)
+                 * eski davranış, büyük ağlarda daha fazla kanıt beklenir.
+                 * DUZELTME (YANLIS NEGATIF): "count >= 20*am" kapisi kaldırıldı.
+                 * Ayirt edici sinyal farkli hedef port SAYISIDIR; count esigi
+                 * 9 hostlu bir LAN'da 30'a cikip 8-20 portluk gercek
+                 * taramalari tamamen kaciriyordu. Adaptif carpan artik
+                 * unique_len esigine uygulanir. */
+                if (t->unique_len >= (int)(8 * am) &&
+                    ids_tracker_can_alert(t)) {
                     char desc[128];
                     char s[46];
                     ids_ip_to_str(pi->src_ip, s, sizeof(s));
                     snprintf(desc, sizeof(desc),
                              "%s -> %d farkli porta SYN taramasi (%u paket)",
-                             s, ids_tracker_unique(t), t->count);
-                    ids_raise_or_update("Port Taramasi (SYN)", "YUKSEK",
-                                        SCORE_YUKSEK, pi, desc, 0, t);
-                }
-                /* [DEĞİŞİKLİK 18] Yavas SYN taramasi: kisa pencere 10 sn'de
-                 * 20 paket + 8 farkli port ister; 2 sn aralikli tarama bu
-                 * esigi HIC gormez ve eskiden tamamen gorunmezdi. */
-                if (ids_tracker_long_scan(t)) {
-                    char ldesc[160];
-                    char ls[46];
-                    ids_ip_to_str(pi->src_ip, ls, sizeof(ls));
-                    snprintf(ldesc, sizeof(ldesc),
-                             "%s -> %u farkli porta YAVAS SYN taramasi "
-                             "(%u paket, %d sn) - hiz sinirlamali tarama",
-                             ls, ids_tracker_long_unique(t), t->long_count,
-                             (int)(t->long_last - t->long_start));
-                    ids_raise_or_update_long("Yavas Port Taramasi (SYN)",
-                                             "YUKSEK", SCORE_YUKSEK, pi,
-                                             ldesc, 0, t);
+                             s, t->unique_len, t->count);
+                    ids_raise_alert("Port Taramasi (SYN)", "YUKSEK",
+                                    SCORE_YUKSEK, pi, desc);
                 }
             }
 
@@ -2678,17 +2255,17 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                 ids_tracker_bump(t, pi->src_ip);
                 /* [DEĞİŞİKLİK 7+10] Esik 100 -> 200 + adaptif carpan;
                  * normal yuksek trafikli sunucular bile 100 SYN toplayabilir. */
-                if (t->count >= (uint32_t)(200 * am) && t->unique_len >= 20) {
+                if (t->count >= (uint32_t)(200 * am) && t->unique_len >= 20 &&
+                    ids_tracker_can_alert(t)) {
                     char desc[128];
                     char d[46];
                     ids_ip_to_str(pi->dst_ip, d, sizeof(d));
                     snprintf(desc, sizeof(desc),
-                             "%s:%u hedefine %u farkli kaynaktan %u SYN (flood)",
-                             d, pi->dst_port, t->unique_len, t->count);
-                    ids_raise_or_update("SYN Flood (DDoS)", "KRITIK",
-                                        SCORE_KRITIK, pi, desc,
-                                        IDS_EV_THRESHOLD_MET |
-                                        IDS_EV_REPEATED, t);
+                             "%s:%u hedefine %u farkli kaynaktan SYN flood",
+                             d, pi->dst_port, t->unique_len);
+                    ids_raise_alert_ev("SYN Flood (DDoS)", "KRITIK",
+                                       SCORE_KRITIK, pi, desc,
+                                       IDS_EV_THRESHOLD_MET | IDS_EV_REPEATED);
                 }
             }
 
@@ -2718,33 +2295,30 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                      * portu tekrar tekrar sayip yanlis "brute force" uyarisi
                      * uretiyordu. Gercek brute force her baglanti denemesinde
                      * yeni bir ephemeral kaynak port kullanir. */
-                    ids_tracker_bump_port(t, pi->src_port);
+                    ids_tracker_bump(t, pi->src_port);
                     /* [DEĞİŞİKLİK 10] Adaptif çarpan. */
-                    if (t->count >= cnt_thr &&
-                        (int)ids_tracker_unique(t) >= uni_thr) {
+                    if (t->count >= cnt_thr && t->unique_len >= uni_thr &&
+                        ids_tracker_can_alert(t)) {
                         char desc[192];
                         char s[46], d[46];
-                        const char *bf_sev = is_web ? "ORTA"
-                                           : (is_auth ? "KRITIK" : "YUKSEK");
-                        double bf_score = is_web ? SCORE_ORTA
-                                         : (is_auth ? SCORE_KRITIK
-                                                    : SCORE_YUKSEK);
                         ids_ip_to_str(pi->src_ip, s, sizeof(s));
                         ids_ip_to_str(pi->dst_ip, d, sizeof(d));
                         snprintf(desc, sizeof(desc),
                                  "%s -> %s:%u arasi %u farkli kaynak porttan %u baglanti denemesi%s",
-                                 s, d, pi->dst_port, ids_tracker_unique(t),
-                                 t->count,
+                                 s, d, pi->dst_port, t->unique_len, t->count,
                                  (is_auth && !dst_priv) ? " (dis hedef)" : "");
-                        ids_raise_or_update(brute_force_name(pi->dst_port),
-                                            bf_sev, bf_score, pi, desc,
-                                            IDS_EV_THRESHOLD_MET |
-                                            IDS_EV_REPEATED |
-                                            (is_auth ? IDS_EV_KNOWN_BAD_PORT
-                                                     : 0) |
-                                            (!ids_ip_in_scope(pi->src_ip)
-                                                 ? IDS_EV_EXTERNAL_SRC : 0),
-                                            t);
+                        ids_raise_alert_ev(brute_force_name(pi->dst_port),
+                                           is_web ? "ORTA"
+                                                  : (is_auth ? "KRITIK" : "YUKSEK"),
+                                           is_web ? SCORE_ORTA
+                                                  : (is_auth ? SCORE_KRITIK
+                                                             : SCORE_YUKSEK),
+                                           pi, desc,
+                                           IDS_EV_THRESHOLD_MET |
+                                           IDS_EV_REPEATED |
+                                           (is_auth ? IDS_EV_KNOWN_BAD_PORT : 0) |
+                                           (!ids_ip_in_scope(pi->src_ip)
+                                                ? IDS_EV_EXTERNAL_SRC : 0));
                     }
                 }
             }
@@ -2762,7 +2336,6 @@ static void ids_check_rules(const IdsPktInfo *pi) {
             t = ids_tracker_get(key);
             if (t) {
                 ids_tracker_bump(t, pi->dst_ip);
-                ids_tracker_long_bump(t, pi->dst_ip);     /* [18] uzun ufuk */
                 int priv = 0, pub = 0;
                 for (int u = 0; u < t->unique_len; u++) {
                     if (ids_ip_is_private(t->unique[u])) priv++;
@@ -2773,39 +2346,18 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                 int wk = (pi->dst_port < 1024);
                 uint32_t priv_thr = (uint32_t)((wk ? 30 : 15) * am);
                 uint32_t pub_thr  = (uint32_t)((wk ? 12 : 6) * am);
-                if (priv >= (int)priv_thr || pub >= (int)pub_thr) {
-                    t->long_short_hit = 1;   /* [18] kisa pencere yakaladi */
+                if ((priv >= (int)priv_thr || pub >= (int)pub_thr) &&
+                    ids_tracker_can_alert(t)) {
                     char desc[192];
                     char s[46];
                     ids_ip_to_str(pi->src_ip, s, sizeof(s));
                     snprintf(desc, sizeof(desc),
                              "%s -> %u farkli hedefe port %u SYN (yatay tarama; "
-                             "%d ozel / %d genel hedef, %u paket)",
-                             s, t->unique_len, pi->dst_port, priv, pub,
-                             t->count);
-                    ids_raise_or_update("Yatay Tarama (Ayni Port)", "YUKSEK",
-                                        SCORE_YUKSEK, pi, desc,
-                                        IDS_EV_THRESHOLD_MET |
-                                        IDS_EV_MULTI_PORT, t);
-                }
-                /* [DEĞİŞİKLİK 18] Yavas yatay tarama (tek port, cok hedef):
-                 * hedefler arasinda sn'lerce beklendiginde kisa pencere
-                 * esigi (ozel 15 / genel 6) hic dolmuyordu. */
-                if (ids_tracker_long_scan(t)) {
-                    char ldesc[192];
-                    char ls[46];
-                    ids_ip_to_str(pi->src_ip, ls, sizeof(ls));
-                    snprintf(ldesc, sizeof(ldesc),
-                             "%s -> %u farkli hedefe YAVAS port %u taramasi "
-                             "(%u paket, %d sn) - hiz sinirlamali yatay tarama",
-                             ls, ids_tracker_long_unique(t), pi->dst_port,
-                             t->long_count,
-                             (int)(t->long_last - t->long_start));
-                    ids_raise_or_update_long("Yavas Yatay Tarama (Ayni Port)",
-                                             "YUKSEK", SCORE_YUKSEK, pi,
-                                             ldesc,
-                                             IDS_EV_THRESHOLD_MET |
-                                             IDS_EV_MULTI_PORT, t);
+                             "%d ozel / %d genel hedef)",
+                             s, t->unique_len, pi->dst_port, priv, pub);
+                    ids_raise_alert_ev("Yatay Tarama (Ayni Port)", "YUKSEK",
+                                       SCORE_YUKSEK, pi, desc,
+                                       IDS_EV_THRESHOLD_MET | IDS_EV_MULTI_PORT);
                 }
             }
         }
@@ -2815,99 +2367,28 @@ static void ids_check_rules(const IdsPktInfo *pi) {
             snprintf(key, sizeof(key), "T|FIN|%u", pi->src_ip);
             t = ids_tracker_get(key);
             if (t) {
-                ids_tracker_bump_port(t, pi->dst_port);
-                ids_tracker_long_bump(t, pi->dst_port);   /* [18] uzun ufuk */
-                if (t->count >= 15 && ids_tracker_unique(t) >= 5) {
-                    t->long_short_hit = 1;   /* [18] kisa pencere yakaladi */
-                    char desc[128];
-                    char s[46];
-                    ids_ip_to_str(pi->src_ip, s, sizeof(s));
-                    snprintf(desc, sizeof(desc),
-                             "%s -> %u farkli porta FIN-only stealth tarama (%u paket)",
-                             s, ids_tracker_unique(t), t->count);
-                    ids_raise_or_update("Port Taramasi (FIN)", "YUKSEK",
-                                        SCORE_YUKSEK, pi, desc, 0, t);
-                }
-                /* [DEĞİŞİKLİK 18] Yavas FIN-only ("stealth") taramasi:
-                 * nmap -sF -T1 gibi hiz sinirlamali taramalar 10 sn'de
-                 * 15 FIN paketi birakmaz; uzun ufuk bunlari yakalar. */
-                if (ids_tracker_long_scan(t)) {
-                    char ldesc[160];
-                    char ls[46];
-                    ids_ip_to_str(pi->src_ip, ls, sizeof(ls));
-                    snprintf(ldesc, sizeof(ldesc),
-                             "%s -> %u farkli porta YAVAS FIN-only stealth "
-                             "tarama (%u paket, %d sn) - hiz sinirlamali",
-                             ls, ids_tracker_long_unique(t), t->long_count,
-                             (int)(t->long_last - t->long_start));
-                    ids_raise_or_update_long("Yavas Port Taramasi (FIN)",
-                                             "YUKSEK", SCORE_YUKSEK, pi,
-                                             ldesc, 0, t);
-                }
+                ids_tracker_bump(t, pi->dst_port);
+                if (t->count >= 15 && t->unique_len >= 5 && ids_tracker_can_alert(t))
+                    ids_raise_alert("Port Taramasi (FIN)", "YUKSEK",
+                                    SCORE_YUKSEK, pi, "FIN-only paketlerle stealth tarama");
             }
         } else if (is_null) {
             snprintf(key, sizeof(key), "T|NULL|%u", pi->src_ip);
             t = ids_tracker_get(key);
             if (t) {
-                ids_tracker_bump_port(t, pi->dst_port);
-                ids_tracker_long_bump(t, pi->dst_port);   /* [18] uzun ufuk */
-                if (t->count >= 15 && ids_tracker_unique(t) >= 5) {
-                    t->long_short_hit = 1;   /* [18] kisa pencere yakaladi */
-                    char desc[128];
-                    char s[46];
-                    ids_ip_to_str(pi->src_ip, s, sizeof(s));
-                    snprintf(desc, sizeof(desc),
-                             "%s -> %u farkli porta flagsiz (NULL) stealth tarama (%u paket)",
-                             s, ids_tracker_unique(t), t->count);
-                    ids_raise_or_update("Port Taramasi (NULL)", "YUKSEK",
-                                        SCORE_YUKSEK, pi, desc, 0, t);
-                }
-                /* [DEĞİŞİKLİK 18] Yavas flagsiz (NULL) tarama. */
-                if (ids_tracker_long_scan(t)) {
-                    char ldesc[160];
-                    char ls[46];
-                    ids_ip_to_str(pi->src_ip, ls, sizeof(ls));
-                    snprintf(ldesc, sizeof(ldesc),
-                             "%s -> %u farkli porta YAVAS flagsiz (NULL) "
-                             "stealth tarama (%u paket, %d sn) - hiz sinirlamali",
-                             ls, ids_tracker_long_unique(t), t->long_count,
-                             (int)(t->long_last - t->long_start));
-                    ids_raise_or_update_long("Yavas Port Taramasi (NULL)",
-                                             "YUKSEK", SCORE_YUKSEK, pi,
-                                             ldesc, 0, t);
-                }
+                ids_tracker_bump(t, pi->dst_port);
+                if (t->count >= 15 && t->unique_len >= 5 && ids_tracker_can_alert(t))
+                    ids_raise_alert("Port Taramasi (NULL)", "YUKSEK",
+                                    SCORE_YUKSEK, pi, "Flagsiz (NULL) paketlerle stealth tarama");
             }
         } else if (is_xmas) {
             snprintf(key, sizeof(key), "T|XMAS|%u", pi->src_ip);
             t = ids_tracker_get(key);
             if (t) {
-                ids_tracker_bump_port(t, pi->dst_port);
-                ids_tracker_long_bump(t, pi->dst_port);   /* [18] uzun ufuk */
-                if (t->count >= 15 && ids_tracker_unique(t) >= 5) {
-                    t->long_short_hit = 1;   /* [18] kisa pencere yakaladi */
-                    char desc[128];
-                    char s[46];
-                    ids_ip_to_str(pi->src_ip, s, sizeof(s));
-                    snprintf(desc, sizeof(desc),
-                             "%s -> %u farkli porta FIN+PSH+URG (Xmas) stealth tarama (%u paket)",
-                             s, ids_tracker_unique(t), t->count);
-                    ids_raise_or_update("Port Taramasi (Xmas)", "YUKSEK",
-                                        SCORE_YUKSEK, pi, desc, 0, t);
-                }
-                /* [DEĞİŞİKLİK 18] Yavas Xmas tarama. */
-                if (ids_tracker_long_scan(t)) {
-                    char ldesc[160];
-                    char ls[46];
-                    ids_ip_to_str(pi->src_ip, ls, sizeof(ls));
-                    snprintf(ldesc, sizeof(ldesc),
-                             "%s -> %u farkli porta YAVAS FIN+PSH+URG (Xmas) "
-                             "stealth tarama (%u paket, %d sn) - hiz sinirlamali",
-                             ls, ids_tracker_long_unique(t), t->long_count,
-                             (int)(t->long_last - t->long_start));
-                    ids_raise_or_update_long("Yavas Port Taramasi (Xmas)",
-                                             "YUKSEK", SCORE_YUKSEK, pi,
-                                             ldesc, 0, t);
-                }
+                ids_tracker_bump(t, pi->dst_port);
+                if (t->count >= 15 && t->unique_len >= 5 && ids_tracker_can_alert(t))
+                    ids_raise_alert("Port Taramasi (Xmas)", "YUKSEK",
+                                    SCORE_YUKSEK, pi, "FIN+PSH+URG (Xmas) paketlerle stealth tarama");
             }
         }
 
@@ -2945,32 +2426,13 @@ static void ids_check_rules(const IdsPktInfo *pi) {
             snprintf(key, sizeof(key), "U|%u", pi->src_ip);
             t = ids_tracker_get(key);
             if (t) {
-                ids_tracker_bump_port(t, pi->dst_port);
-                ids_tracker_long_bump(t, pi->dst_port);   /* [18] uzun ufuk */
-                if (t->count >= 15 && ids_tracker_unique(t) >= 8 &&
-                    ids_tracker_can_alert(t)) {
-                    t->long_short_hit = 1;   /* [18] kisa pencere yakaladi */
+                ids_tracker_bump(t, pi->dst_port);
+                if (t->count >= 15 && t->unique_len >= 8 && ids_tracker_can_alert(t))
                     ids_raise_alert("UDP Port Taramasi", "ORTA", SCORE_ORTA, pi,
                                     "Tek kaynaktan cok sayida farkli UDP portuna paket");
-                }
-                if (t->count >= 200 && ids_tracker_unique(t) >= 10 &&
-                    ids_tracker_can_alert(t))
+                if (t->count >= 200 && t->unique_len >= 10 && ids_tracker_can_alert(t))
                     ids_raise_alert("UDP Flood", "ORTA", SCORE_ORTA, pi,
                                     "Tek kaynaktan asiri UDP trafigi");
-                /* [DEĞİŞİKLİK 18] Yavas UDP taramasi (nmap -sU -T1 gibi):
-                 * 10 sn'de 15 paket/8 port esigi dolmaz, tarama gorunmezdi. */
-                if (ids_tracker_long_scan(t)) {
-                    char ldesc[160];
-                    char ls[46];
-                    ids_ip_to_str(pi->src_ip, ls, sizeof(ls));
-                    snprintf(ldesc, sizeof(ldesc),
-                             "%s -> %u farkli UDP portuna YAVAS tarama "
-                             "(%u paket, %d sn) - hiz sinirlamali",
-                             ls, ids_tracker_long_unique(t), t->long_count,
-                             (int)(t->long_last - t->long_start));
-                    ids_raise_or_update_long("Yavas UDP Port Taramasi", "ORTA",
-                                             SCORE_ORTA, pi, ldesc, 0, t);
-                }
             }
         }
 
@@ -3001,26 +2463,9 @@ static void ids_check_rules(const IdsPktInfo *pi) {
             t = ids_tracker_get(key);
             if (t) {
                 ids_tracker_bump(t, pi->dst_ip);
-                ids_tracker_long_bump(t, pi->dst_ip);     /* [18] uzun ufuk */
-                if (t->unique_len >= 20 && ids_tracker_can_alert(t)) {
-                    t->long_short_hit = 1;   /* [18] kisa pencere yakaladi */
+                if (t->unique_len >= 20 && ids_tracker_can_alert(t))
                     ids_raise_alert("Ping Sweep", "ORTA", SCORE_ORTA, pi,
                                     "Tek kaynaktan cok sayida farkli yerel hedefe ICMP (ag kesfi)");
-                }
-                /* [DEĞİŞİKLİK 18] Yavas ping sweep: hedefler arasinda
-                 * sn'lerce beklenen ag kesfi (nmap -sn --max-rate 1). */
-                if (ids_tracker_long_scan(t)) {
-                    char ldesc[160];
-                    char ls[46];
-                    ids_ip_to_str(pi->src_ip, ls, sizeof(ls));
-                    snprintf(ldesc, sizeof(ldesc),
-                             "%s -> %u farkli yerel hedefe YAVAS ICMP "
-                             "(ping sweep) (%u paket, %d sn) - hiz sinirlamali",
-                             ls, ids_tracker_long_unique(t), t->long_count,
-                             (int)(t->long_last - t->long_start));
-                    ids_raise_or_update_long("Yavas Ping Sweep", "ORTA",
-                                             SCORE_ORTA, pi, ldesc, 0, t);
-                }
             }
         }
         snprintf(key, sizeof(key), "IF|%u", pi->src_ip);
@@ -3160,18 +2605,6 @@ void ids_init(void) {
 void ids_cleanup(void) {
     if (!g_ids_initialized) return;
     g_ids.running = 0;
-    /* [DEGISIKLIK 17] Port bitmap'leri malloc'lu: serbest birak. */
-    for (int i = 0; i < g_tracker_count; i++) {
-        if (g_trackers[i].unique_bits) {
-            free(g_trackers[i].unique_bits);
-            g_trackers[i].unique_bits = NULL;
-        }
-        /* [DEGISIKLIK 18] uzun ufuk bitmap'i de serbest birakilir. */
-        if (g_trackers[i].long_bits) {
-            free(g_trackers[i].long_bits);
-            g_trackers[i].long_bits = NULL;
-        }
-    }
     platform_mutex_destroy(&g_ids_lock);
     g_ids_initialized = 0;
 }
@@ -3191,8 +2624,7 @@ static void ids_check_local_scan(const IdsPktInfo *pi) {
     snprintf(key, sizeof(key), "L|%u", pi->src_ip);
     t = ids_tracker_get(key);
     if (t) {
-        ids_tracker_bump_port(t, pi->dst_port);
-        ids_tracker_long_bump(t, pi->dst_port);           /* [18] uzun ufuk */
+        ids_tracker_bump(t, pi->dst_port);
         /* DUZELTME (YANLIS NEGATIF): eski kosul t->count >= 16 idi. Gercek
          * nmap taramalari ayni 10 sn penceresine 8 veya 15 farkli porta
          * yalnizca 8/15 SYN biraktiginda (retransmit yok) kural hic
@@ -3200,37 +2632,15 @@ static void ids_check_local_scan(const IdsPktInfo *pi) {
          * "kac FARKLI porta" oldugu icin esik yalnizca unique_len uzerinde
          * tutulur; count her zaman unique_len'den buyuk/esit oldugundan
          * ayrica count esigi gereksiz ve zararlidir. */
-        if (ids_tracker_unique(t) >= 8) {
-            t->long_short_hit = 1;   /* [18] kisa pencere yakaladi */
+        if (t->unique_len >= 8 && ids_tracker_can_alert(t)) {
             char desc[128];
             char s[46];
             ids_ip_to_str(pi->src_ip, s, sizeof(s));
             snprintf(desc, sizeof(desc),
                      "%s -> %u farkli porta disari SYN taramasi (%u paket)",
-                     s, ids_tracker_unique(t), t->count);
-            /* Tarama surerken sayilar buyur; uyari METNI guncel kalir. */
-            ids_raise_or_update("Yerel Kaynakli Port Taramasi", "YUKSEK",
-                                SCORE_YUKSEK, pi, desc, 0, t);
-        }
-        /* --- [DEĞİŞİKLİK 18] UZUN UFUK: yavaş (hız sınırlamalı) tarama ---
-         * Gerçek trafikte doğrulanan KAÇIŞ: `nmap --scan-delay 1.5s -p 1-30`
-         * ~45 sn sürer ve her 10 sn'lik pencereye en çok 7 farklı port
-         * bırakır; bu yüzden L| kuralı (8 farklı port) HİÇ tetiklenmiyordu
-         * — yani yavaşlatmak tespitten kaçmanın yolu haline gelmişti.
-         * Uzun ufuk, kısa pencere hiç tetiklenmediyse ve gözlem süresi
-         * min_span'i geçtiyse uyarır; hızlı patlamalar (zaten raporlanan)
-         * çift raporlanmaz. */
-        if (ids_tracker_long_scan(t)) {
-            char ldesc[160];
-            char ls[46];
-            ids_ip_to_str(pi->src_ip, ls, sizeof(ls));
-            snprintf(ldesc, sizeof(ldesc),
-                     "%s -> %u farkli porta YAVAS disari SYN taramasi "
-                     "(%u paket, %d sn) - hiz sinirlamali tarama",
-                     ls, ids_tracker_long_unique(t), t->long_count,
-                     (int)(t->long_last - t->long_start));
-            ids_raise_or_update_long("Yavas Port Taramasi (Yerel Kaynakli)",
-                                     "YUKSEK", SCORE_YUKSEK, pi, ldesc, 0, t);
+                     s, t->unique_len, t->count);
+            ids_raise_alert("Yerel Kaynakli Port Taramasi", "YUKSEK",
+                            SCORE_YUKSEK, pi, desc);
         }
     }
 }

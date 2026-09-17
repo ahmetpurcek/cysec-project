@@ -27,6 +27,32 @@
 #define IDS_WINDOW_SEC         10      /* eşik penceresi (saniye) */
 #define IDS_ALERT_COOLDOWN     60      /* aynı uyarının tekrarı arası (sn) */
 
+/* ===== [DEĞİŞİKLİK 18] YAVAŞ (HIZ SINIRLAMALI) TARAMA — UZUN UFUK ======
+ * SORUN (gerçek trafikte doğrulandı): yukarıdaki 10 sn'lik tumbling pencere
+ * yalnızca PATLAMA halindeki taramayı görür. `nmap --scan-delay 2s` gibi
+ * hız sınırlı bir tarama port başına ~2 sn beklediğinden aynı pencereye en
+ * fazla 5-6 farklı port düşer; hiçbir tarama kuralının eşiği dolmaz ve
+ * tarama TAMAMEN GÖRÜNMEZ olur (yavaşlatmak = kaçmak).
+ *
+ * ÇÖZÜM: kısa pencere (IDS_WINDOW_SEC) aynen korunur; YANINA, aktivite
+ * boşluğu ile kapanan bağımsız bir UZUN UFUK eklenir. Bu, gerçek IDS'lerin
+ * (Zeek flow timeout, Snort sfPortscan watchdog, Suricata threshold+timeout)
+ * kullandığı yaklaşımdır: akış/örnek penceresi son paketten sonra boşluğa
+ * düşünce kapanır.
+ *
+ * ÇİFT RAPORLAMA YOK (iki bağımsız kapı):
+ *  1) Aynı ufuk içinde kısa pencere kuralı bir kez bile tetiklendiyse uzun
+ *     ufuk susar (hızlı patlama zaten rapor edilmiştir).
+ *  2) Gözlem süresi IDS_SCAN_MIN_SPAN_SEC'i geçmelidir; saniyeler içinde
+ *     biten patlamalar "yavaş" sayılmaz.
+ * Eşik IDS_SCAN_LONG_UNIQUE=24: kısa pencerede 8 farklı port / 10 sn olan
+ * hızın, 300 sn'ye yayılmış halde ~24 farklı porta karşılık gelmesi
+ * ölçüt alınmıştır (seyrek dağılım telafisi). */
+#define IDS_SCAN_IDLE_GAP_SEC    30    /* son paketten sonra ufuk kapanışı (sn) */
+#define IDS_SCAN_LONG_WINDOW_SEC 300   /* uzun ufuk azami ömrü (sn) */
+#define IDS_SCAN_MIN_SPAN_SEC    15    /* "yavaş" sayılmak için min gözlem (sn) */
+#define IDS_SCAN_LONG_UNIQUE     24    /* uzun ufukta farklı değer eşiği */
+
 /* ========== LAN katmanı sabitleri ========== */
 #define IDS_MAX_HOSTS          128     /* Tehdit Haritası host kapasitesi */
 #define IDS_MAX_FLOWS          1024    /* akış tablosu kapasitesi */
@@ -159,6 +185,16 @@ void ids_set_network_range(const char *cidr);
 void ids_scope_set(const char *ips[], int n);
 void ids_scope_clear(void);
 
+/* ===== [DEĞİŞİKLİK 18] Uzun ufuk (yavaş tarama) kalibrasyon kancası =====
+ * Üretimde varsayılanlar (header sabitleri) kullanılır; bu kanca yalnızca
+ * testlerin uzun ufuk davranışını (boşluk ile sıfırlama, min gözlem süresi)
+ * gerçek zamanda beklemek zorunda kalmadan kanıtlayabilmesi içindir.
+ * 0 veya negatif verilen alan DEĞİŞTİRİLMEZ (kısmi güncelleme güvenli). */
+void ids_set_scan_window_params(int idle_gap_sec, int max_window_sec,
+                                int min_span_sec, int long_unique_thr);
+void ids_get_scan_window_params(int *idle_gap_sec, int *max_window_sec,
+                                int *min_span_sec, int *long_unique_thr);
+
 /* ========== SOC v3: korelasyonlu olay + triyaj API ========== */
 typedef struct {
     char        attacker_ip[46];
@@ -178,6 +214,8 @@ int  ids_set_alert_status(int index, int status);
 int  ids_set_alert_note(int index, const char *note);
 
 #endif /* NETWORK_IDS_H */
+
+
 
 
 

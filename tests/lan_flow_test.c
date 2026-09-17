@@ -303,6 +303,8 @@ int main(void) {
             "192.168.1.31", "192.168.1.32", "192.168.1.40", "192.168.1.41",
             "192.168.1.42", "192.168.1.43", "192.168.1.44", "192.168.1.77",
             "192.168.1.78", "192.168.1.101", "192.168.1.255",
+            /* [DEĞİŞİKLİK 18] uzun ufuk (yavas tarama) test kaynaklari */
+            "192.168.1.150", "192.168.1.151",
         };
         ids_scope_set(scope, (int)(sizeof(scope) / sizeof(scope[0])));
     }
@@ -377,8 +379,20 @@ int main(void) {
         IdsHostThreat *h = find_host(&sn, "192.168.1.10");
         CHECK(h != NULL, "host 10 yok");
         if (h) {
-            CHECK(h->attack_score == 24,
-                  "sweep(+15)+scan(+10)-bozunum(1)=24 bekleniyor, %u",
+            /* [DEGISIKLIK 16] Eski beklenti 24, L| (yerel kaynakli tarama)
+             * kuralinin bu senaryoda hic TETIKLENMEDIGI eski motora aitti
+             * (dogrulandi: depodaki HEAD motoruyla ayni testte 0 L| uyarisi,
+             * skor 24). Yerel tarama kuralinin esigi duzeltildikten sonra
+             * ayni trafik L| uyarisi uretiyor ve uyari host skoruna isleniyor:
+             *   +20  L| "Yerel Kaynakli Port Taramasi" (YUKSEK) -> IDS_F_SCAN
+             *   +15  akis analizi SWEEP (SWEEP bonusu; SCAN bonusu +10
+             *        verilmez cunku IDS_F_SCAN zaten ayarli)
+             *   -1   yaslanma / bozunum (decay, saniyede 1)
+             *   = 34
+             * Kendi agimizdan cikan gercek bir nmap taramasi da ayni
+             * puanlamayi almali; 24 beklemek gercegi eksik gosteriyordu. */
+            CHECK(h->attack_score == 34,
+                  "L|(+20)+sweep(+15)-bozunum(1)=34 bekleniyor, %u",
                   h->attack_score);
             CHECK((h->flags & IDS_F_SWEEP) != 0, "SWEEP bayragi yok");
             CHECK((h->flags & IDS_F_SCAN) != 0, "SCAN bayragi yok");
@@ -391,11 +405,166 @@ int main(void) {
             CHECK(h->unique_target_ports == 13, "12 tarama + 443 = 13 port, %u",
                   h->unique_target_ports);
         }
-        /* skor siralamasi: ilk kayit en yuksek saldirgan olmali */
-        CHECK(sn.count > 0 && sn.hosts[0].attack_score >=
-                  (find_host(&sn, "192.168.1.10") ? 24 : 0),
-              "snapshot saldiri skoruna gore sirali");
+        /* skor siralamasi: ilk kayit en yuksek saldirgan olmali.
+         * Sabit bir esik yerine host'un KENDI skoruyla karsilastirilir;
+         * esik degeri testin geri kalanindan bagimsiz kalsin. */
+        IdsHostThreat *top10 = find_host(&sn, "192.168.1.10");
+        CHECK(sn.count > 0 && top10 != NULL &&
+                  sn.hosts[0].attack_score == top10->attack_score,
+              "snapshot saldiri skoruna gore sirali (en yuksek ilk "
+              "sirada), %u",
+              sn.count > 0 ? sn.hosts[0].attack_score : 0);
         (void)n;
+    }
+
+    printf("== [DEGISIKLIK 16] L| taramasi: hedef degisince TEK satir\n");
+    printf("==                          guncellenir (agregasyon) ==\n");
+    {
+        /* DUZELTILEN HATA: ids_aggregate_alert yalnizca (imza + src + dst)
+         * TAM eslesmesine bakiyordu. Tarama hedef degistirdiginde hicbir
+         * satir bulunamiyor, dedup anahtari da (imza|src|dst) yeni hedefte
+         * bastirdigi icin ne mevcut satir guncelleniyor ne yeni satir
+         * yayinlaniyordu. Sonuc: uyari metni DONUYORDU ("8 farkli port
+         * yazmaya devam ediyordu) ve tarama buyudukce olay kucuk
+         * gorunuyordu. Yeni iki gecisli mantik: 1. gecis ayni hedef,
+         * 2. gecis ayni kaynak + hedef DEGISTI (hedef alani guncellenir). */
+        IdsGuiAlert al[16];
+        static const char *sig = "Yerel Kaynakli Port Taramasi";
+
+        int n0 = ids_get_alerts_snapshot(al, 16);
+        int lscan0 = 0;
+        for (int i = 0; i < n0; i++)
+            if (strcmp(al[i].sig_name, sig) == 0) lscan0++;
+        CHECK(lscan0 >= 1,
+              "onceki tarama blogu L| uyarisi uretmis olmali, %d", lscan0);
+
+        uint64_t t_a = g_ids.total_alerts;
+
+        /* 1) Ayni kaynak + AYNI hedef, 8 yeni benzersiz port (kural esigi):
+         *    mevcut satir guncellenmeli, yeni satir acilmamali. */
+        for (int i = 0; i < 8; i++) {
+            PacketRecord p = pkt_tcp(ip4("192.168.1.10"), ip4("192.168.1.20"),
+                                     (uint16_t)(52000 + i),
+                                     (uint16_t)(200 + i), 1);
+            ids_process_packet(&p);
+        }
+        int n1 = ids_get_alerts_snapshot(al, 16);
+        int lscan1 = 0, u1 = -1, p1 = -1;
+        for (int i = 0; i < n1; i++) {
+            if (strcmp(al[i].sig_name, sig) != 0) continue;
+            lscan1++;
+            if (sscanf(al[i].description,
+                       "%*s -> %d farkli porta disari SYN taramasi (%d paket)",
+                       &u1, &p1) != 2) {
+                u1 = p1 = -1;
+            }
+        }
+        CHECK(lscan1 == lscan0,
+              "ayni hedefte satir sayisi degismemeli: %d -> %d",
+              lscan0, lscan1);
+        CHECK(u1 >= 8 && p1 >= 8,
+              "L| aciklamasi guncel sayilari tasimali: %d/%d", u1, p1);
+        CHECK(g_ids.total_alerts == t_a,
+              "soguma (cooldown) icinde yeni satir yayinlanmamali "
+              "(%llu -> %llu)", (unsigned long long)t_a,
+              (unsigned long long)g_ids.total_alerts);
+
+        /* 2) AYNI kaynak, FARKLI hedef (.23). Eski kod burada uyariyi
+         *    guncelleyemezdi (sahte yanlis negatif); yeni 2. gecis ayni
+         *    satiri bulur ve hedef + sayilari tazeler. */
+        for (int i = 0; i < 8; i++) {
+            PacketRecord p = pkt_tcp(ip4("192.168.1.10"), ip4("192.168.1.23"),
+                                     (uint16_t)(52100 + i),
+                                     (uint16_t)(300 + i), 1);
+            ids_process_packet(&p);
+        }
+        int n2 = ids_get_alerts_snapshot(al, 16);
+        int lscan2 = 0, last = -1, u2 = -1, p2 = -1;
+        for (int i = 0; i < n2; i++) {
+            if (strcmp(al[i].sig_name, sig) != 0) continue;
+            lscan2++;
+            last = i;
+        }
+        CHECK(lscan2 == lscan0,
+              "hedef degisince YENI satir acilmamali: %d -> %d",
+              lscan0, lscan2);
+        CHECK(last >= 0, "L| satiri bulunamadi");
+        if (last >= 0) {
+            CHECK(sscanf(al[last].description,
+                         "%*s -> %d farkli porta disari SYN taramasi (%d paket)",
+                         &u2, &p2) == 2,
+                  "aciklama ayristirilamadi: %s", al[last].description);
+            CHECK(u2 > u1 && p2 > p1,
+                  "aciklama metni TAZELENMELI (eski hata: donuk kaliyordu) "
+                  "%d/%d -> %d/%d", u1, p1, u2, p2);
+            CHECK(strcmp(al[last].dst_ip, "192.168.1.23") == 0,
+                  "hedef alani 2. gecisle guncellenmeli: %s",
+                  al[last].dst_ip);
+        }
+        CHECK(g_ids.total_alerts == t_a,
+              "guncelleme yayin degil olmali (uyari sayisi sismemeli) "
+              "(%llu -> %llu)", (unsigned long long)t_a,
+              (unsigned long long)g_ids.total_alerts);
+    }
+
+    printf("== [DEGISIKLIK 16] ids_clear_alerts sonrasi uyari SESSIZCE\n");
+    printf("==                          kaybolmaz (dedup serbest) ==\n");
+    {
+        /* SENARYO: kullanici uyari listesini temizler (ids_clear_alerts)
+         * ama dedup tablosu (TTL 120 sn) TEMIZLENMEZ. Olay surerken ayni
+         * (imza, saldirgan, kurban) uclusu tekrar tetiklenirse: kural
+         * sogumasi (IDS_ALERT_COOLDOWN = 60 sn) yeni yayina izin vermez,
+         * toplama yapacak satir da yoktur, dedup ise bastirir -> uyari
+         * TAMAMEN kaybolurdu ("sildim, bir daha gelmedi" hatasi). Yama bu
+         * durumda dedup kaydini serbest birakip olayi yeniden yayinlar. */
+        static const char *sig = "Yerel Kaynakli Port Taramasi";
+        IdsGuiAlert al[16];
+
+        /* Temiz bir kaynak: .12 (kapsamda). Ayni hedefe 8 benzersiz port ->
+         * kural tetiklenir ve dedup (imza|.12|.20) silahlanir. */
+        for (int i = 0; i < 8; i++) {
+            PacketRecord p = pkt_tcp(ip4("192.168.1.12"), ip4("192.168.1.20"),
+                                     (uint16_t)(53000 + i),
+                                     (uint16_t)(400 + i), 1);
+            ids_process_packet(&p);
+        }
+        int nb = ids_get_alerts_snapshot(al, 16);
+        int l12 = 0;
+        for (int i = 0; i < nb; i++)
+            if (strcmp(al[i].sig_name, sig) == 0) l12++;
+        CHECK(l12 >= 1, ".12 taramasi icin L| satiri olusmali, %d", l12);
+
+        /* Analist listedeki kayitlari siler (dedup tablosu kalir). */
+        ids_clear_alerts();
+        CHECK(ids_get_alerts_snapshot(al, 16) == 0,
+              "ids_clear_alerts sonrasi liste bos olmali");
+
+        /* Olay DEVAM EDIYOR: ayni kaynak/hedef, soguma aktif + dedup aktif.
+         * Eski kod: hicbir cikti yok. Yeni kod: dedup serbest -> yeniden
+         * yayin. */
+        uint64_t t_b = g_ids.total_alerts;
+        PacketRecord again = pkt_tcp(ip4("192.168.1.12"), ip4("192.168.1.20"),
+                                     53100, 401, 1);
+        ids_process_packet(&again);
+        CHECK(g_ids.total_alerts == t_b + 1,
+              "silme + dedup sonrasi uyari YENIDEN yayinlanmali "
+              "(%llu -> %llu)", (unsigned long long)t_b,
+              (unsigned long long)g_ids.total_alerts);
+        int rn = ids_get_alerts_snapshot(al, 16);
+        CHECK(rn == 1 && strcmp(al[rn - 1].sig_name, sig) == 0,
+              "yeniden yayinlanan satir L| olmali (n=%d, %s)", rn,
+              rn >= 1 ? al[rn - 1].sig_name : "-");
+
+        /* Uyari geri geldikten sonra ayni olay tekrar tekrar uyari
+         * uretmemeli: satir yerinde oldugu icin agregasyon yolu calisir. */
+        uint64_t t_c = g_ids.total_alerts;
+        PacketRecord again2 = pkt_tcp(ip4("192.168.1.12"), ip4("192.168.1.20"),
+                                      53101, 402, 1);
+        ids_process_packet(&again2);
+        CHECK(g_ids.total_alerts == t_c,
+              "olay surerken uyari sayisi sismemeli (%llu -> %llu)",
+              (unsigned long long)t_c,
+              (unsigned long long)g_ids.total_alerts);
     }
 
     printf("== Brute force kurban skoru ==\n");
@@ -1018,11 +1187,309 @@ int main(void) {
               "[14] gercek dinleyici (.15:5555) 'Dinleme Servisi' uyarmali");
     }
 
+    printf("== [DEGISIKLIK 17] 500 portluk taramada farkli-port sayaci\n");
+    printf("==                          64'te DOYUMA UGRAMAZ ==\n");
+    {
+        /* DUZELTILEN HATA: IdsTracker.unique[64] sabit ornek dizisiydi;
+         * 64 farkli porttan sonra sayac doyuma ugruyordu. Gercek nmap
+         * taramasi ekranda hep "64 farkli porta" yaziyordu (yanlis rapor).
+         * Yama: port alani (0..65535) icin 8192 baytlik bitmap; ilk 64
+         * ornek rapor icin korunur, 65. portta bitmap devreye girer. */
+        static const char *sig = "Yerel Kaynakli Port Taramasi";
+        /* Tarayan kaynak: LAN icinde, ancak bu ana kadar HIC trafik
+         * uretmemis bir adres secildi. Sebep: sayac 10 sn'lik pencerede
+         * kaynak basina tutuluyor ve onceki bloklarin 192.168.1.10'dan
+         * biraktigi paketler ayni pencereye dustugu icin "N paket"
+         * olcumu 529/471 gibi kayabiliyordu. Taze kaynakla paket sayaci
+         * TAM olarak bu blogun urettigi trafigi gosterir; bitmap mantigi
+         * kaynak adresinden bagimsizdir (anahtar: "L|<src_ip>"). */
+        static const char *src = "192.168.1.60";   /* LAN kokenli kaynak */
+        IdsGuiAlert al[16];
+        int n, last, u, pk;
+
+        /* Onceki bloklar izleme kapsamini degistirdi (sc_bf); taranan
+         * hedefler (.101, .23) o kapsamda olmadigi icin paketler daha
+         * kapsam suzgecinde dusuyor ve hic alarm uretilmiyordu. Bu yuzden
+         * (1) kapsami bu blok icin yeniden kur, (2) temiz sayfayla basla
+         * — liste bos oldugunda motor bastirmayi serbest birakip yayinlar
+         * (bkz. DEGISIKLIK 16). Boylece olcum yalnizca bu blokla ilgili
+         * olur. */
+        static const char *sc17[] = {"192.168.1.60", "192.168.1.101",
+                                     "192.168.1.23"};
+        ids_scope_set(sc17, 3);
+        ids_clear_alerts();
+
+        for (int port = 1; port <= 500; port++) {
+            PacketRecord p = pkt_tcp(ip4(src), ip4("192.168.1.101"),
+                                     40000, (uint16_t)port, 1);
+            ids_process_packet(&p);
+        }
+        n = ids_get_alerts_snapshot(al, 16);
+        last = -1;
+        for (int i = 0; i < n; i++)
+            if (strcmp(al[i].sig_name, sig) == 0 &&
+                strcmp(al[i].src_ip, src) == 0) {
+                last = i;
+            }
+        CHECK(last >= 0, "500 portluk tarama L| uyarisi uretmeli (n=%d)", n);
+        if (last >= 0) {
+            u = pk = -1;
+            CHECK(sscanf(al[last].description,
+                         "%*s -> %d farkli porta disari SYN taramasi (%d paket)",
+                         &u, &pk) == 2,
+                  "aciklama ayristirilamadi: %s", al[last].description);
+            CHECK(u == 500,
+                  "500 farkli port TAM sayilmali (doyum hatasi), %d", u);
+            CHECK(pk == 500, "paket sayaci 500 olmali, %d", pk);
+        }
+
+        /* 2) Pencere sonu (IDS_WINDOW_SEC): bitmap SIFIRLANMAZSA onceki
+         * pencerenin portlari yeni pencerede de sayilir ve sayac sismis
+         * gorunur (500 + 20 = 520 gibi). Asilip yeni 20 porta dokunulur;
+         * sonuc TAM 20 olmali. */
+        sleep(IDS_WINDOW_SEC + 1);
+        for (int i = 0; i < 20; i++) {
+            PacketRecord p = pkt_tcp(ip4(src), ip4("192.168.1.23"),
+                                     (uint16_t)(41000 + i),
+                                     (uint16_t)(6000 + i), 1);
+            ids_process_packet(&p);
+        }
+        n = ids_get_alerts_snapshot(al, 16);
+        last = -1;
+        for (int i = 0; i < n; i++)
+            if (strcmp(al[i].sig_name, sig) == 0 &&
+                strcmp(al[i].src_ip, src) == 0) {
+                last = i;
+            }
+        CHECK(last >= 0, "pencere sonrasi L| satiri bulunamadi (n=%d)", n);
+        if (last >= 0) {
+            u = pk = -1;
+            CHECK(sscanf(al[last].description,
+                         "%*s -> %d farkli porta disari SYN taramasi (%d paket)",
+                         &u, &pk) == 2,
+                  "aciklama ayristirilamadi: %s", al[last].description);
+            CHECK(u == 20,
+                  "pencere kapaninca farkli-port sayaci SIFIRLANMALI "
+                  "(eski pencerenin portlari sizmamali), %d", u);
+            CHECK(pk == 20, "yeni pencerede paket sayaci 20 olmali, %d", pk);
+        }
+    }
+
+
+    /* ==============================================================
+     * [DEGISIKLIK 18] UZUN UFUK — YAVAS (HIZ SINIRLAMALI) TARAMA
+     * ==============================================================
+     * GERCEK BULGU (canli trafikte dogrulandi): `nmap --scan-delay 1.5s
+     * -p 1-30` gibi yavaslatilmis bir tarama, 10 sn'lik KISA pencereye en
+     * fazla 5-7 FARKLI port birakir. "8 farkli port" esikli S| ve L|
+     * kurallari bu yuzden HIC tetiklenmezdi — yani taramayi YAVASLATMAK
+     * tespitten kacmanin yolu haline gelmisti (gercek yanlis negatif).
+     * Cozum: ikinci (uzun) ufuk. Kisa pencere iskaladiysa ve gozlem suresi
+     * min_span'i gectiyse uyarir; kisa pencerenin zaten yakaladigi
+     * patlamalar CIFT raporlanmaz (long_short_hit kiliti).
+     *
+     * Asagidaki test uretim esiklerini (24 farkli port / 15 sn / 30 sn
+     * bosluk) kucultur ki test 40+ saniye surmesin; MANTIK birebir ayni
+     * kalir: idle_gap=3 sn, max_window=60 sn, min_span=2 sn, thr=6.
+     */
+    printf("== [DEGISIKLIK 18] yavas (hiz sinirlamali) tarama uzun ufukta ==\n");
+    {
+        IdsGuiAlert al[16];
+        static const char *short_sig = "Yerel Kaynakli Port Taramasi";
+        static const char *long_sig  = "Yavas Port Taramasi (Yerel Kaynakli)";
+        const char *slow_src = "192.168.1.150";   /* yavas tarayan kaynak */
+        const char *fast_src = "192.168.1.151";   /* hizli patlama kaynagi */
+
+        /* ONEMLI: onceki bloklar izleme kapsamini degistirdi (sc17). Kapsam
+         * DISI paketler daha ids_process_packet icinde dusuyor ve hicbir
+         * kural calismiyor. Ilk denemede test bu yuzden YANLIS NEGATIF
+         * verdi (uzun ufuk satiri olusmadi) — gercek trafikte de ayni tuzak
+         * var: kapsam yanlissa hicbir IDS kurali calismaz. Bu yuzden kapsam
+         * blok icinde kurulur ve temiz sayfayla baslanir. */
+        static const char *sc18[] = { "192.168.1.20",
+                                      "192.168.1.150", "192.168.1.151" };
+        ids_scope_set(sc18, 3);
+        ids_clear_alerts();
+
+        /* --- FAZ 0: uretim varsayilanlari beklenen degerlerde mi ------- */
+        int di = -1, dm = -1, dsn = -1, dt = -1;
+        ids_get_scan_window_params(&di, &dm, &dsn, &dt);
+        CHECK(di == IDS_SCAN_IDLE_GAP_SEC && dm == IDS_SCAN_LONG_WINDOW_SEC &&
+              dsn == IDS_SCAN_MIN_SPAN_SEC && dt == IDS_SCAN_LONG_UNIQUE,
+              "uretim varsayilanlari korunmali: %d/%d/%d/%d (beklenen %d/%d/%d/%d)",
+              di, dm, dsn, dt, IDS_SCAN_IDLE_GAP_SEC, IDS_SCAN_LONG_WINDOW_SEC,
+              IDS_SCAN_MIN_SPAN_SEC, IDS_SCAN_LONG_UNIQUE);
+
+        ids_set_scan_window_params(3, 60, 2, 6);
+        ids_get_scan_window_params(&di, &dm, &dsn, &dt);
+        CHECK(di == 3 && dm == 60 && dsn == 2 && dt == 6,
+              "test parametreleri uygulanmali: %d/%d/%d/%d", di, dm, dsn, dt);
+
+        /* --- FAZ A: kisa pencereyi ISKALAYAN yavas tarama yakalanmali --- */
+        int n = ids_get_alerts_snapshot(al, 16);
+        int long_before = 0, short_before = 0;
+        for (int i = 0; i < n; i++) {
+            if (strcmp(al[i].sig_name, long_sig) == 0) long_before++;
+            if (strcmp(al[i].sig_name, short_sig) == 0 &&
+                strcmp(al[i].src_ip, slow_src) == 0) short_before++;
+        }
+        CHECK(n == 0, "temiz sayfa ile baslanmali (ids_clear_alerts), n=%d", n);
+        CHECK(long_before == 0,
+              "uzun ufuk satiri onceden bulunmamali, %d", long_before);
+        CHECK(short_before == 0,
+              "%s icin kisa pencere satiri onceden olmamali, %d",
+              slow_src, short_before);
+
+        uint64_t t_a = g_ids.total_alerts;
+        /* 7 FARKLI hedef port, ~0.7 sn aralikla (toplam ~4 sn gozlem).
+         * Kisa pencerede yalnizca 7 farkli port -> S|/L| (8) SESSIZ kalir;
+         * uzun ufuk (thr=6, min_span=2) YAKALAMALI. */
+        for (int i = 0; i < 7; i++) {
+            PacketRecord p = pkt_tcp(ip4(slow_src), ip4("192.168.1.20"),
+                                     (uint16_t)(55000 + i),
+                                     (uint16_t)(700 + i), 1);
+            ids_process_packet(&p);
+            usleep(700000);
+        }
+
+        n = ids_get_alerts_snapshot(al, 16);
+        int lrow = -1, short_rows = 0;
+        for (int i = 0; i < n; i++) {
+            if (strcmp(al[i].sig_name, long_sig) == 0) lrow = i;
+            if (strcmp(al[i].sig_name, short_sig) == 0 &&
+                strcmp(al[i].src_ip, slow_src) == 0) short_rows++;
+        }
+        CHECK(short_rows == 0,
+              "7 farkli port kisa esigi (8) ASMAMALI -> kisa kural sessiz, %d",
+              short_rows);
+        CHECK(lrow >= 0,
+              "YAVAS tarama uzun ufukta YAKALANMALI (sessiz yanlis negatif!)");
+        CHECK(g_ids.total_alerts > t_a,
+              "uzun ufuk bir uyari YAYINLAMALI (%llu -> %llu)",
+              (unsigned long long)t_a, (unsigned long long)g_ids.total_alerts);
+
+        char descA[128] = "";
+        int lu = -1, lp = -1, lsec = -1;
+        if (lrow >= 0) {
+            CHECK(strcmp(al[lrow].severity, "YUKSEK") == 0,
+                  "uzun ufuk uyarisi YUKSEK olmali: %s", al[lrow].severity);
+            CHECK(strstr(al[lrow].description, "YAVAS") != NULL,
+                  "aciklama 'yavas' ayrimini tasimali: %s",
+                  al[lrow].description);
+            CHECK(sscanf(al[lrow].description,
+                         "%*s -> %d farkli porta YAVAS disari SYN taramasi "
+                         "(%d paket, %d sn)", &lu, &lp, &lsec) == 3,
+                  "aciklama ayristirilamadi: %s", al[lrow].description);
+            CHECK(lu >= 6, "uzun ufuk esigi (6) asilmali: %d", lu);
+            CHECK(lsec >= 2, "gozlem suresi min_span'i gecmeli: %d sn", lsec);
+            CHECK(strcmp(al[lrow].dst_ip, "192.168.1.20") == 0,
+                  "hedef alani dogru olmali: %s", al[lrow].dst_ip);
+            snprintf(descA, sizeof(descA), "%s", al[lrow].description);
+        }
+
+        /* --- FAZ B: BOSLUK (idle gap) ufku SIFIRLAMALI -----------------
+         * IDS_WINDOW_SEC+1 beklenir: hem kisa pencere kapanir (yoksa 3 yeni
+         * port kisa kurali tetikler) hem de uzun ufuk bosluga duser. Yeni
+         * ufukta 6 farkli port -> metin 6'yi gostermeli. Sifirlama
+         * CALISMIYORSA sayac 7+6=13'e cikar ve metin 13 olurdu. */
+        sleep(IDS_WINDOW_SEC + 1);
+        for (int i = 0; i < 6; i++) {
+            PacketRecord p = pkt_tcp(ip4(slow_src), ip4("192.168.1.20"),
+                                     (uint16_t)(55100 + i),
+                                     (uint16_t)(800 + i), 1);
+            ids_process_packet(&p);
+            usleep(600000);
+        }
+        n = ids_get_alerts_snapshot(al, 16);
+        int l2 = -1;
+        for (int i = 0; i < n; i++)
+            if (strcmp(al[i].sig_name, long_sig) == 0) l2 = i;
+        CHECK(l2 >= 0, "uzun ufuk satiri kaybolmamali (n=%d)", n);
+        if (l2 >= 0) {
+            int u2 = -1, p2 = -1, s2 = -1;
+            CHECK(sscanf(al[l2].description,
+                         "%*s -> %d farkli porta YAVAS disari SYN taramasi "
+                         "(%d paket, %d sn)", &u2, &p2, &s2) == 3,
+                  "aciklama ayristirilamadi: %s", al[l2].description);
+            CHECK(u2 == 6,
+                  "BOSLUK ufku SIFIRLAMALI: yeni ufukta TAM 6 farkli port "
+                  "olmali (eski sayac sizsaydi 13 olurdu), %d", u2);
+            CHECK(s2 <= 4,
+                  "yeni ufkun gozlem suresi kucuk olmali (eski ufkun basi "
+                  "tasindiysa buyuk cikar): %d sn", s2);
+            if (strlen(descA) > 0)
+                CHECK(strcmp(al[l2].description, descA) != 0,
+                      "metin yeni ufkun sayilariyla TAZELENMELI, %s",
+                      al[l2].description);
+        }
+
+        /* --- FAZ C: KISA kuralin yakaladigi patlama CIFT raporlanmaz ----
+         * 8 farkli port ANINDA -> L| kisa kurali tetiklenir. Ardindan ufku
+         * canli tutup (1 sn aralik) min_span asilir: uzun ufkun TUM kosullari
+         * saglanir AMA kisa kural ayni olayi zaten bildirdigi icin uzun ufuk
+         * susmali. long_short_hit kiliti calismazsa burada CIFT satir olusur. */
+        int burst = 0;
+        for (int i = 0; i < 8; i++) {
+            PacketRecord p = pkt_tcp(ip4(fast_src), ip4("192.168.1.20"),
+                                     (uint16_t)(56000 + i),
+                                     (uint16_t)(900 + i), 1);
+            ids_process_packet(&p);
+        }
+        for (int i = 0; i < 4; i++) {
+            sleep(1);
+            PacketRecord p = pkt_tcp(ip4(fast_src), ip4("192.168.1.20"),
+                                     (uint16_t)(56100 + i),
+                                     (uint16_t)(950 + i), 1);
+            ids_process_packet(&p);
+            burst++;
+        }
+        n = ids_get_alerts_snapshot(al, 16);
+        int fast_short = 0, fast_long = 0, all_long = 0;
+        for (int i = 0; i < n; i++) {
+            if (strcmp(al[i].sig_name, long_sig) == 0) {
+                all_long++;
+                if (strcmp(al[i].src_ip, fast_src) == 0) fast_long++;
+            }
+            if (strcmp(al[i].sig_name, short_sig) == 0 &&
+                strcmp(al[i].src_ip, fast_src) == 0) fast_short++;
+        }
+        CHECK(burst == 4, "canli tutma paketleri gonderildi, %d", burst);
+        CHECK(fast_short >= 1,
+              "HIZLI patlama kisa kural tarafindan raporlanmali, %d",
+              fast_short);
+        CHECK(fast_long == 0,
+              "kisa kuralin yakaladigi patlama uzun ufukta CIFT "
+              "raporlanmamali, %d", fast_long);
+        CHECK(all_long == 1,
+              "listede yalnizca %s kaynakli uzun ufuk satiri olmali, %d",
+              slow_src, all_long);
+
+        /* Test degerleri uretim varsayilanlarina geri alinir (sonraki
+         * bloklar ve gercek calisma etkilenmesin). */
+        ids_set_scan_window_params(IDS_SCAN_IDLE_GAP_SEC,
+                                   IDS_SCAN_LONG_WINDOW_SEC,
+                                   IDS_SCAN_MIN_SPAN_SEC,
+                                   IDS_SCAN_LONG_UNIQUE);
+        ids_get_scan_window_params(&di, &dm, &dsn, &dt);
+        CHECK(di == IDS_SCAN_IDLE_GAP_SEC && dm == IDS_SCAN_LONG_WINDOW_SEC &&
+              dsn == IDS_SCAN_MIN_SPAN_SEC && dt == IDS_SCAN_LONG_UNIQUE,
+              "uretim varsayilanlari geri yuklenmeli: %d/%d/%d/%d",
+              di, dm, dsn, dt);
+    }
+
     ids_cleanup();
 
     printf("\n%d test, %d basarisiz\n", g_total, g_failed);
     return g_failed ? 1 : 0;
 }
+
+
+
+
+
+
+
+
 
 
 
