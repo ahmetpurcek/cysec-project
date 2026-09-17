@@ -14,6 +14,7 @@
 | **Ağdan Kesme (ARP Black-Hole)** | Raw `AF_PACKET` soketleri ile hedef cihaza sürekli sahte ARP yanıtı göndererek internet erişimini keser/geri verir |
 | **Otonom Port Tarayıcı (AutoPort)** | Nmap bağımsız, çok kanallı (thread pool) TCP/raw port ve servis analizi; TTL tabanlı OS tahmini |
 | **Canlı Trafik İzleme** | `libpcap` ile gerçek zamanlı paket yakalama ve L3/L4 ayrıştırma |
+| **İzleme Listesi (Mon List)** | Ağ izleyicisi ve ARP saldırılarını belirli IP'lerle sınırlandır |
 | **Ağ IDS** | 20 kural: ARP spoofing, MITM, sahte TCP bayrakları, yatay/dikey port taraması, SSH brute-force, SQLi/XSS/JNDI/Meterpreter imzaları |
 | **Display Filtre Motoru** | Wireshark tarzı filtre ifadeleri (`ip.addr == 10.0.0.5 && tcp.port == 443`) — 138 birim testle doğrulanmış |
 

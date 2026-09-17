@@ -63,6 +63,16 @@ static PacketRecord pkt_tcp(uint32_t src, uint32_t dst, uint16_t sp,
     return p;
 }
 
+/* pkt_tcp ile ayni, ama self olmayan attacker src MAC'i (DE:AD:BE:EF:00:07)
+ * kullanir: ids_is_self_originated filtresini baypas eder ve paketi normal
+ * kural islemcisinden (C| dahil) gecirir. */
+static PacketRecord pkt_tcp_att(uint32_t src, uint32_t dst, uint16_t sp,
+                                uint16_t dp, int syn) {
+    PacketRecord p = pkt_tcp(src, dst, sp, dp, syn);
+    mac_set(p.raw_data + 6, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x07);
+    return p;
+}
+
 /* Ethernet + IPv4 + UDP çerçevesi */
 static PacketRecord pkt_udp(uint32_t src, uint32_t dst, uint16_t sp,
                             uint16_t dp) {
@@ -282,6 +292,21 @@ int main(void) {
     ids_set_mac_context("AA:BB:CC:DD:EE:01", "00:11:22:33:44:55",
                         "192.168.1.1", "192.168.1.10");
 
+    /* Izleme kapsami: test boyunca kullanilan IP'leri kapsayan liste
+     * (bos kapsam = hicbir sey izlenmez; kapsam testleri dosya sonunda). */
+    {
+        static const char *scope[] = {
+            "0.0.0.0",
+            "192.168.1.1", "192.168.1.10", "192.168.1.12", "192.168.1.13",
+            "192.168.1.14", "192.168.1.15", "192.168.1.17", "192.168.1.18",
+            "192.168.1.19", "192.168.1.20", "192.168.1.23", "192.168.1.30",
+            "192.168.1.31", "192.168.1.32", "192.168.1.40", "192.168.1.41",
+            "192.168.1.42", "192.168.1.43", "192.168.1.44", "192.168.1.77",
+            "192.168.1.78", "192.168.1.101", "192.168.1.255",
+        };
+        ids_scope_set(scope, (int)(sizeof(scope) / sizeof(scope[0])));
+    }
+
     IdsHostThreatSnapshot sn;
 
     printf("== Kapsam + host olusumu ==\n");
@@ -452,7 +477,8 @@ int main(void) {
     printf("== SOC v3: DNS DGA algilama ==\n");
     {
         uint64_t before = g_ids.total_alerts;
-        for (int i = 0; i < 30; i++) {
+        /* [D5] yeni esik DGA_MIN_QCOUNT=60 -> 65 sorgu */
+        for (int i = 0; i < 65; i++) {
             char q[64];
             snprintf(q, sizeof(q), "dga%02dx7wq8k.com", i);
             PacketRecord p = pkt_dns(ip4("192.168.1.14"), ip4("192.168.1.1"),
@@ -593,18 +619,22 @@ int main(void) {
     {
         ids_clear_alerts();
         /* 3 farkli hosttan deterministik uyari uret:
-         * DGA(.14), DGA(.16), Tunel(.15) */
-        for (int i = 0; i < 30; i++) {
+         * DGA(.17), DGA(.18), Tunel(.19).
+         * Not [D8]: .14 DGA'si ve .15 Tunel'i onceki testlerde zaten uyari
+         * uretti; global dedup (TTL 120 sn) ayni (imza, saldirgan, kurban)
+         * uclusunu bastirdigi icin burada henuz uyari uretmemis hostlar
+         * kullanilir. 70 sorgu -> qcount>=60 && dcount(40 cap)>=20. */
+        for (int i = 0; i < 70; i++) {
             char q[64];
             snprintf(q, sizeof(q), "dga%02dx7wq8k.com", i);
-            PacketRecord p = pkt_dns(ip4("192.168.1.14"), ip4("192.168.1.1"),
+            PacketRecord p = pkt_dns(ip4("192.168.1.17"), ip4("192.168.1.1"),
                                      40000 + i, 53, q, 0, 0);
             ids_process_packet(&p);
-            PacketRecord p2 = pkt_dns(ip4("192.168.1.16"), ip4("192.168.1.1"),
+            PacketRecord p2 = pkt_dns(ip4("192.168.1.18"), ip4("192.168.1.1"),
                                       41000 + i, 53, q, 0, 0);
             ids_process_packet(&p2);
         }
-        PacketRecord t = pkt_dns(ip4("192.168.1.15"), ip4("192.168.1.1"),
+        PacketRecord t = pkt_dns(ip4("192.168.1.19"), ip4("192.168.1.1"),
                                  42000, 53, "aabbccddeeff0011.example.com",
                                  0, 0);
         ids_process_packet(&t);
@@ -643,10 +673,12 @@ int main(void) {
         CHECK(ids_remove_alert(0) == 0, "bos diziden silme kabul edildi!");
     }
 
-    printf("== kotu amacli port: yon bayragi (port sahibi saldirgan) ==\n");
+    printf("== kotu amacli port: dinleme kaniti (port sahibi saldirgan) ==\n");
     {
-        /* Meterpreter dinleyicisi: 192.168.1.15:4444'e 23 baglaniyor.
-         * Port sahibi (dst) saldirgandir -> GUI onu once gosterir. */
+        /* [D1] 4444'te dinleyen saldirgan (192.168.1.15), istemci
+         * 192.168.1.23. Tek SYN uyari uretmez (sahte tarama olabilir);
+         * SYN-ACK ile tamamlanan 2 baglanti kaniti -> "Dinleme Servisi
+         * (Kritik Port)". Port sahibi (listener) saldirgandir. */
         PacketRecord m = pkt_tcp(ip4("192.168.1.23"), ip4("192.168.1.15"),
                                  52000, 4444, 1);
         /* Yabanci MAC: yerel trafik bastirmasini atla (kural motoru calissin) */
@@ -655,25 +687,38 @@ int main(void) {
         m.raw_data[10] = 0x00; m.raw_data[11] = 0x01;
         ids_process_packet(&m);
 
+        /* SYN-ACK (0x12): dinleyici .15:4444 -> istemci .23:52000 */
+        PacketRecord sa = pkt_tcp(ip4("192.168.1.15"), ip4("192.168.1.23"),
+                                  4444, 52000, 0);
+        sa.raw_data[6] = 0xDE; sa.raw_data[7] = 0xAD;
+        sa.raw_data[8] = 0xBE; sa.raw_data[9] = 0xEF;
+        sa.raw_data[10] = 0x00; sa.raw_data[11] = 0x01;
+        sa.raw_data[47] |= 0x02;   /* ACK(0x10) -> SYN-ACK (0x12) */
+        ids_process_packet(&sa);   /* connection_count = 1 */
+        ids_process_packet(&sa);   /* connection_count = 2 -> kapidan gecer */
+
         IdsGuiAlert snaps[4];
         int n = ids_get_alerts_snapshot(snaps, 4);
-        CHECK(n == 1, "Meterpreter uyarisi sayisi 1, %d", n);
+        CHECK(n == 1, "dinleme uyarisi sayisi 1, %d", n);
         if (n >= 1) {
             IdsGuiAlert *a = &snaps[n - 1];
-            CHECK(strstr(a->sig_name, "Meterpreter") != NULL,
+            CHECK(strstr(a->sig_name, "Dinleme Servisi") != NULL,
                   "imza: %s", a->sig_name);
-            CHECK(a->src_port == 52000 && a->dst_port == 4444,
+            CHECK(a->src_port == 4444 && a->dst_port == 52000,
                   "portlar src=%u dst=%u", a->src_port, a->dst_port);
-            CHECK(strcmp(a->src_ip, "192.168.1.23") == 0,
+            CHECK(strcmp(a->src_ip, "192.168.1.15") == 0,
                   "src_ip: %s", a->src_ip);
-            CHECK(strcmp(a->dst_ip, "192.168.1.15") == 0,
+            CHECK(strcmp(a->dst_ip, "192.168.1.23") == 0,
                   "dst_ip: %s", a->dst_ip);
             CHECK(a->port_owner_attacker == 1,
                   "port_owner_attacker bayragi set edilmedi");
         }
-        /* Cooldown: ayni akis 60 sn icinde bir daha uyari uretmemeli */
+        /* Cooldown (IDS_MP_ALERT_CD=120) + dedup: ayni akis bir daha
+         * uyari uretmemeli (ekstra SYN ve 3. tamamlanan baglanti). */
         uint64_t before = g_ids.total_alerts;
         ids_process_packet(&m);
+        ids_process_packet(&m);
+        ids_process_packet(&sa);
         CHECK(g_ids.total_alerts == before,
               "cooldown calismadi: %llu -> %llu",
               (unsigned long long)before,
@@ -721,8 +766,9 @@ int main(void) {
               "benign host DGA bayragi aldi: %u",
               h31 ? h31->flags : 0);
 
-        /* 2) Gercek DGA kalibi: 25+ benzersiz rastgele alan -> TAM 1 uyari */
-        for (int i = 0; i < 25; i++) {
+        /* 2) Gercek DGA kalibi: 65+ benzersiz rastgele alan -> TAM 1
+         *    uyari (yeni esik DGA_MIN_QCOUNT=60) */
+        for (int i = 0; i < 65; i++) {
             char q[64];
             snprintf(q, sizeof(q), "vqkzxmtdqplx%c%c.com", (char)('a' + i / 26), (char)('a' + i % 26));
             PacketRecord p = pkt_dns(ip4("192.168.1.32"), ip4("192.168.1.1"),
@@ -741,7 +787,7 @@ int main(void) {
               dn >= 1 ? da[dn - 1].sig_name : "?");
 
         /* Sticky: fazladan sorgu yeni uyari uretmez */
-        for (int i = 25; i < 30; i++) {
+        for (int i = 65; i < 70; i++) {
             char q[64];
             snprintf(q, sizeof(q), "vqkzxmtdqplx%c%c.com", (char)('a' + i / 26), (char)('a' + i % 26));
             PacketRecord p = pkt_dns(ip4("192.168.1.32"), ip4("192.168.1.1"),
@@ -754,11 +800,232 @@ int main(void) {
               (unsigned long long)g_ids.total_alerts);
     }
 
+    printf("== izleme kapsami: bos liste = pasif, dolu = yalnizca listedekiler ==\n");
+    {
+        uint64_t base = g_ids.total_pkts_processed;
+
+        /* Bos kapsam: hicbir paket islenmemeli */
+        ids_scope_clear();
+        PacketRecord p1 = pkt_tcp(ip4("192.168.1.15"), ip4("192.168.1.23"),
+                                  52000, 4444, 1);
+        p1.raw_data[6] = 0xDE; p1.raw_data[7] = 0xAD;
+        p1.raw_data[8] = 0xBE; p1.raw_data[9] = 0xEF;
+        p1.raw_data[10] = 0x00; p1.raw_data[11] = 0x01;
+        ids_process_packet(&p1);
+        CHECK(g_ids.total_pkts_processed == base,
+              "bos kapsamda paket islenmemeli (%llu -> %llu)",
+              (unsigned long long)base,
+              (unsigned long long)g_ids.total_pkts_processed);
+
+        /* Kapsam dolu: listedeki IP'lere ait paket islenir */
+        const char *sc2[] = {"192.168.1.15"};
+        ids_scope_set(sc2, 1);
+        ids_process_packet(&p1);
+        CHECK(g_ids.total_pkts_processed == base + 1,
+              "kapsamdaki paket islenmeli (%llu)",
+              (unsigned long long)g_ids.total_pkts_processed);
+
+        /* Kapsam disi: iki ucu da listede olmayan paket islenmez */
+        PacketRecord p2 = pkt_tcp(ip4("192.168.1.99"), ip4("192.168.1.23"),
+                                  52000, 4444, 1);
+        p2.raw_data[6] = 0xDE; p2.raw_data[7] = 0xAD;
+        p2.raw_data[8] = 0xBE; p2.raw_data[9] = 0xEF;
+        p2.raw_data[10] = 0x00; p2.raw_data[11] = 0x01;
+        ids_process_packet(&p2);
+        CHECK(g_ids.total_pkts_processed == base + 1,
+              "kapsam disi paket islenmemeli (%llu)",
+              (unsigned long long)g_ids.total_pkts_processed);
+
+        /* Tekrar bosalt: yine pasif */
+        ids_scope_clear();
+        ids_process_packet(&p1);
+        CHECK(g_ids.total_pkts_processed == base + 1,
+              "tekrar bosalan kapsamda paket islenmemeli (%llu)",
+              (unsigned long long)g_ids.total_pkts_processed);
+    }
+
+    printf("== [DEĞİŞİKLİK 12] Brute force yanlis pozitif duzeltmesi ==\n");
+    {
+        /* Izleme kapsami: oncesi scope testi kapsami bosaltti; yeniden kur. */
+        static const char *sc_bf[] = {
+            "192.168.1.14", "192.168.1.19", "192.168.1.30",
+            "192.168.1.44", "192.168.1.77", "192.168.1.78",
+        };
+        ids_scope_set(sc_bf, (int)(sizeof(sc_bf) / sizeof(sc_bf[0])));
+        ids_set_network_range("192.168.1.0/24");
+
+        uint32_t browser = ip4("192.168.1.30");
+        uint32_t cloudflare = ip4("104.18.41.41");
+        uint64_t before = g_ids.total_alerts;
+
+        /* (1) Normal tarayici davranisi: LAN -> genel web (443). 12 paralel
+         * baglanti yanlis pozitif kaynagiydi; artik ASLA uyari yok. */
+        for (int i = 0; i < 12; i++) {
+            PacketRecord p = pkt_tcp_att(browser, cloudflare,
+                                         (uint16_t)(43000 + i), 443, 1);
+            ids_process_packet(&p);
+        }
+        CHECK(g_ids.total_alerts == before,
+              "FP: genel web (443) tarayici trafigi uyari uretmemeli "
+              "(%llu -> %llu)",
+              (unsigned long long)before,
+              (unsigned long long)g_ids.total_alerts);
+
+        /* (2) Yerel web sunucusuna tek kaynaktan 62 SYN = firtina. */
+        uint32_t web_vic = ip4("192.168.1.77");
+        uint32_t web_att = ip4("192.168.1.78");
+        for (int i = 0; i < 62; i++) {
+            PacketRecord p = pkt_tcp_att(web_att, web_vic,
+                                         (uint16_t)(44000 + i), 443, 1);
+            ids_process_packet(&p);
+        }
+        {
+            IdsGuiAlert al[8];
+            int n = ids_get_alerts_snapshot(al, 8);
+            int found = 0;
+            for (int i = 0; i < n; i++) {
+                if (strstr(al[i].sig_name, "Web Brute Force") != NULL) {
+                    found = 1;
+                    CHECK(strcmp(al[i].severity, "ORTA") == 0,
+                          "web brute sev ORTA olmali, %s", al[i].severity);
+                }
+            }
+            CHECK(found, "yerel web firtinasi 'Web Brute Force' uyarmali");
+        }
+
+        /* (3) Yerel SSH brute force: 26 SYN. */
+        uint32_t ssh_vic = ip4("192.168.1.14");
+        uint32_t ssh_att = ip4("192.168.1.19");
+        for (int i = 0; i < 26; i++) {
+            PacketRecord p = pkt_tcp_att(ssh_att, ssh_vic,
+                                         (uint16_t)(45000 + i), 22, 1);
+            ids_process_packet(&p);
+        }
+        {
+            IdsGuiAlert al[8];
+            int n = ids_get_alerts_snapshot(al, 8);
+            int found = 0;
+            for (int i = 0; i < n; i++) {
+                if (strstr(al[i].sig_name, "SSH Brute Force") != NULL) {
+                    found = 1;
+                    CHECK(strcmp(al[i].severity, "KRITIK") == 0,
+                          "SSH brute sev KRITIK olmali, %s", al[i].severity);
+                }
+            }
+            CHECK(found, "yerel SSH brute force uyarmali");
+        }
+
+        /* (4) Dis hedefe (internet SSH sunucusu) brute force: 26 SYN;
+         * aciklamada '(dis hedef)' ibaresi olmali. */
+        uint32_t ext_ssh = ip4("203.0.113.9");
+        uint32_t ext_att = ip4("192.168.1.44");
+        for (int i = 0; i < 26; i++) {
+            PacketRecord p = pkt_tcp_att(ext_att, ext_ssh,
+                                         (uint16_t)(46000 + i), 22, 1);
+            ids_process_packet(&p);
+        }
+        {
+            IdsGuiAlert al[8];
+            int n = ids_get_alerts_snapshot(al, 8);
+            int found = 0;
+            for (int i = 0; i < n; i++) {
+                if (strstr(al[i].sig_name, "SSH Brute Force") != NULL &&
+                    al[i].description[0] &&
+                    strstr(al[i].description, "(dis hedef)") != NULL) {
+                    found = 1;
+                }
+            }
+            CHECK(found, "dis hedef SSH brute '(dis hedef)' ibaresi icermeli");
+        }
+    }
+
+    printf("== [14] malport yanlis pozitif duzeltmeleri ==\n");
+
+    /* (1) Yetim SYN-ACK (self nmap senaryosu): kendi makinemizden (.15)
+     * .22:1099'a atilan SYN'ler self filtresiyle bastiriliyordu; hedefin
+     * SYN-ACK cevaplari feed'e yetim ulasiyor, seviye-2 (1099) kayit
+     * aciliyor ve connection_count sayilarak YANLIS "Dinleme Servisi
+     * (Kritik Port)" alarmi uretiliyordu (ekranda: "2 tamamlanan
+     * baglanti, 0 SYN girisimi"). Artik eslesen SYN kaniti olmayan
+     * SYN-ACK hicbir sey uretmemeli. */
+    {
+        uint64_t before = g_ids.total_alerts;
+        for (int i = 0; i < 3; i++) {
+            PacketRecord p = pkt_tcp_att(ip4("192.168.1.77"),
+                                         ip4("192.168.1.78"),
+                                         1099, (uint16_t)(47000 + i), 0);
+            p.raw_data[47] |= 0x02;   /* ACK(0x10) -> SYN-ACK (0x12) */
+            ids_process_packet(&p);
+        }
+        CHECK(g_ids.total_alerts == before,
+              "[14] yetim SYN-ACK (1099) yanlis dinleme alarmi uretmemeli "
+              "(%llu -> %llu)",
+              (unsigned long long)before,
+              (unsigned long long)g_ids.total_alerts);
+    }
+
+    /* (2) Gercek yerel dinleyici: dis istemci (.78) -> .15:5555 SYN atar;
+     * kendi makinemizdeki dinleyici SYN-ACK ile cevaplar (self paket).
+     * Eskiden self SYN-ACK filtreleniyor, synack_seen toplanamiyor ve
+     * uyari ancak karsi taraftan veri akisi gelince dakikalar sonra
+     * cikabiliyordu. Artik ilk SYN-ACK'te aninda KRITIK "Dinleme
+     * Servisi" alarmi beklenir. */
+    {
+        uint64_t before = g_ids.total_alerts;
+
+        /* Tek SYN tek basina dinleme kaniti degil: uyari yok */
+        PacketRecord syn = pkt_tcp_att(ip4("192.168.1.78"),
+                                       ip4("192.168.1.15"),
+                                       55218, 5555, 1);
+        ids_process_packet(&syn);
+        CHECK(g_ids.total_alerts == before,
+              "[14] tek SYN dinleme alarmi uretmemeli (%llu -> %llu)",
+              (unsigned long long)before,
+              (unsigned long long)g_ids.total_alerts);
+
+        /* Self SYN-ACK: dinleme kaniti -> aninda 1 alarm */
+        PacketRecord sa = pkt_tcp(ip4("192.168.1.15"), ip4("192.168.1.78"),
+                                  5555, 55218, 0);
+        sa.raw_data[47] |= 0x02;   /* ACK(0x10) -> SYN-ACK (0x12) */
+        ids_process_packet(&sa);
+
+        CHECK(g_ids.total_alerts == before + 1,
+              "[14] ilk SYN-ACK'te aninda 1 dinleme alarmi beklenir "
+              "(%llu -> %llu)",
+              (unsigned long long)before,
+              (unsigned long long)g_ids.total_alerts);
+
+        IdsGuiAlert al[8];
+        int n = ids_get_alerts_snapshot(al, 8);
+        int found = 0;
+        for (int i = 0; i < n; i++) {
+            if (strstr(al[i].sig_name, "Dinleme Servisi") != NULL &&
+                al[i].src_port == 5555) {
+                found = 1;
+                CHECK(strcmp(al[i].severity, "KRITIK") == 0,
+                      "[14] gercek dinleyici sev KRITIK olmali, %s",
+                      al[i].severity);
+                CHECK(al[i].src_port == 5555 && al[i].dst_port == 55218,
+                      "[14] portlar src=%u dst=%u",
+                      al[i].src_port, al[i].dst_port);
+                CHECK(strstr(al[i].description,
+                             "1 tamamlanan baglanti") != NULL,
+                      "[14] aciklama aninda dogrulamali: %s",
+                      al[i].description);
+            }
+        }
+        CHECK(found,
+              "[14] gercek dinleyici (.15:5555) 'Dinleme Servisi' uyarmali");
+    }
+
     ids_cleanup();
 
     printf("\n%d test, %d basarisiz\n", g_total, g_failed);
     return g_failed ? 1 : 0;
 }
+
+
+
 
 
 

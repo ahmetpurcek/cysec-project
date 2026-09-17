@@ -57,12 +57,25 @@ static float g_scroll_blk = 0;           /* engellenen cihazlar listesi scroll *
 static char g_nm_target[MAX_IP_LEN] = {0}; /* network monitor secili hedef */
 
 /* ========== Izleme Listesi (paket izleme kapsami) ==========
- * Paket izleme / ARP spoof / IDS uyari gosterimi yalnizca bu listedeki
- * IP'lere uygulanir. BOS liste = "tum ag" (kisitlama yok). */
+ * Paket izleme / ARP spoof / IDS uyari gosterimi YALNIZCA bu listedeki
+ * IP'lere uygulanir. BOS liste = izleme KAPALI (hicbir sey izlenmez);
+ * 'TUMUNU EKLE' butonu listeyi tarayici sonuclariyla doldurur. */
 #define MON_LIST_MAX 128
 static char g_mon_ips[MON_LIST_MAX][MAX_IP_LEN];
 static int g_mon_count = 0;
 static float g_scroll_mon_list = 0;
+/* Izleme kapsami geri bildirimi (header kisa notu, or. bos liste) */
+static char g_mon_notice[128] = {0};
+static double g_mon_notice_ts = 0;
+static void mon_notice_set(const char *msg) {
+  if (!msg) return;
+  strncpy(g_mon_notice, msg, sizeof(g_mon_notice) - 1);
+  g_mon_notice_ts = GetTime();
+}
+/* Izleme listesini IDS motor kapsamina yansitir (tanim: rebuild sonrasi) */
+static void mon_list_sync_scope(void);
+/* Bos liste izleme durdurma cagrisi icin erken on bildirim (tanim: L~800) */
+static void capture_stop_all(void);
 
 static int mon_list_has(const char *ip) {
   if (!ip || !ip[0]) return 0;
@@ -80,12 +93,18 @@ static int mon_list_toggle(const char *ip) {
       strncpy(g_mon_ips[i], g_mon_ips[i + 1], MAX_IP_LEN - 1);
     g_mon_ips[g_mon_count - 1][0] = '\0';
     g_mon_count--;
+    mon_list_sync_scope();
+    /* Son cihaz da cikti: bos liste = izleme kapsami yok -> aktif izleme
+     * durdurulur (otomatik olarak tum ag izlenmeye devam edilmez). */
+    if (g_mon_count == 0 && (g_capture_all || g_capture_active_ip[0]))
+      capture_stop_all();
     return 0; /* listeden cikarildi */
   }
   if (g_mon_count >= MON_LIST_MAX) return -1; /* liste dolu */
   strncpy(g_mon_ips[g_mon_count], ip, MAX_IP_LEN - 1);
   g_mon_ips[g_mon_count][MAX_IP_LEN - 1] = '\0';
   g_mon_count++;
+  mon_list_sync_scope();
   return 1; /* eklendi */
 }
 static int mon_list_remove_at(int idx) {
@@ -102,11 +121,27 @@ static void ids_rebuild_alert_view(void) {
   g_ids_alert_view_count = 0;
   for (int i = 0; i < g_ids_alert_count; i++) {
     IdsGuiAlert *va = &g_ids_alerts_snapshot[i];
-    if (mon_list_active() && !mon_list_has(va->src_ip) &&
-        !mon_list_has(va->dst_ip))
+    /* Kapsam: iki uc da listede yoksa gosterme. BOS liste = kapsam yok
+     * -> hicbir uyari gosterilmez (bos listeyken izleme yok). */
+    if (!mon_list_has(va->src_ip) && !mon_list_has(va->dst_ip))
       continue;
     g_ids_alert_map[g_ids_alert_view_count++] = i;
   }
+}
+
+/* Izleme listesini IDS motor kapsamina yansitir. BOS liste = motor pasif
+ * (hicbir paket islenmez); dolu liste = yalnizca listedeki IP'ler. */
+static void mon_list_sync_scope(void) {
+  if (g_mon_count <= 0) {
+    ids_scope_clear();
+  } else {
+    const char *ips[IDS_SCOPE_MAX];
+    int n = 0;
+    for (int i = 0; i < g_mon_count && n < IDS_SCOPE_MAX; i++)
+      ips[n++] = g_mon_ips[i];
+    ids_scope_set(ips, n);
+  }
+  ids_rebuild_alert_view();
 }
 static int g_nm_prev_packet_count = 0;  /* auto-scroll icin onceki paket sayisi */
 static int g_nm_auto_scroll = 1;        /* 1=en altta, otomatik kaydir */
@@ -317,6 +352,10 @@ static void draw_header(int W) {
     else
       capture_start_all();
   }
+  /* Bos liste uyarisi: buton izleme baslatamaz, nedenini goster */
+  if (g_mon_notice[0] && (GetTime() - g_mon_notice_ts) < 4.0)
+    DrawTextC(g_mon_notice, (int)mon_btn.x, (int)mon_btn.y + 26, 8,
+              COLOR_AMBER);
 
   /* Arayuz + IP cipi */
   if (g_scan.local_iface[0]) {
@@ -421,7 +460,7 @@ static void draw_mon_list_panel(int rx, int ry, int rw, int rh) {
                    ui_alpha(COLOR_BORDER, 140));
   draw_panel_title(rx + 10, ry + 10, "IZLEME LISTESI", 12, COLOR_GREEN);
   DrawTextC(mon_list_active() ? "Paket izleme bu IP'lerle sinirli"
-                              : "Bos: tum ag izlenir (kisitlama yok)",
+                              : "Bos: izleme kapali - cihaz ekleyin",
             rx + 10, ry + 24, 8, COLOR_TEXT_DIM);
   /* Tum cihazlari listeye ekle / listeyi bosalt */
   int abw = (rw - 20 - 6) / 2;
@@ -448,6 +487,8 @@ static void draw_mon_list_panel(int rx, int ry, int rw, int rh) {
   if (mch && g_mon_count > 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
     g_mon_count = 0;
     g_scroll_mon_list = 0;
+    mon_list_sync_scope();   /* kapsam bosaldi: IDS artik hicbir sey izlemez */
+    if (g_capture_all || g_capture_active_ip[0]) capture_stop_all();
   }
 
   DrawRectangle(rx + 6, ry + 60, rw - 12, 1, ui_alpha(COLOR_BORDER, 110));
@@ -469,9 +510,9 @@ static void draw_mon_list_panel(int rx, int ry, int rw, int rh) {
   if (g_mon_count == 0) {
     DrawTextC("Liste bos. 'TUMUNU EKLE' ile hepsini ekleyin.", rx + 10,
               list_top + 8, 9, COLOR_TEXT_DIM);
-    DrawTextC("Bos liste = tum ag icin paket izleme / uyari acik.", rx + 10,
+    DrawTextC("Bos liste = izleme kapali (otomatik izleme yok).", rx + 10,
               list_top + 26, 8, ui_alpha(COLOR_TEXT_DIM, 150));
-    DrawTextC("Izleme yalnizca listedeki IP'lere uygulanir (bos = tum ag).",
+    DrawTextC("Izleme yalnizca listedeki IP'lere uygulanir.",
               rx + 10, ry + rh - 14, 7, ui_alpha(COLOR_TEXT_DIM, 160));
     return;
   }
@@ -519,7 +560,7 @@ static void draw_mon_list_panel(int rx, int ry, int rw, int rh) {
   draw_custom_scrollbar(area.x + area.width - 6, list_top, 8, list_h,
                         g_mon_count * item_h, &g_scroll_mon_list);
 
-  DrawTextC("Izleme yalnizca listedeki IP'lere uygulanir (bos = tum ag).",
+  DrawTextC("Izleme yalnizca listedeki IP'lere uygulanir.",
             rx + 10, ry + rh - 14, 7, ui_alpha(COLOR_TEXT_DIM, 160));
 }
 
@@ -812,6 +853,12 @@ static void capture_stop_all(void) {
 
 /* Tum ag izleme: full_monitor + gateway ARP spoof (tum cihazlar) */
 static void capture_start_all(void) {
+  /* BOS liste = izleme kapsami yok: tum agi izlemeye CALISMA. Kullanici
+   * once 'TUMUNU EKLE' / IZLE ile cihazlari listeye almalidir. */
+  if (g_mon_count == 0) {
+    mon_notice_set("Izleme listesi bos: once cihaz ekleyin (TUMUNU EKLE)");
+    return;
+  }
   capture_stop_all();
   full_monitor_clear();
   g_capture_all = 1;
@@ -1231,7 +1278,7 @@ static void draw_panel_security(int W, int H) {
     DrawTextC(al->severity, ir.x + 16, ir.y + 8, 8, sc);
 
     /* Skor badge */
-    snprintf(buf, sizeof(buf), "%.0f%% guven skoru", al->score * 100);
+    snprintf(buf, sizeof(buf), "%.0f%% risk skoru", al->score * 100);
     int skw = MeasureText(buf, 8) + 10;
     DrawRectangleRounded(
         (Rectangle){ir.x + 12 + slw + 6, ir.y + 6, skw, 14}, 0.5f, 4,
@@ -1489,9 +1536,9 @@ static void draw_panel_tools(int W, int H) {
       DrawTextC("Bir hedef IP secin.", 24, cy + 4, 11, COLOR_TEXT_DIM);
       cy += 20;
     } else {
-      /* Izleme pasif - Alarm Merkezi > TUM AGI IZLE ile baslatin */
-      DrawTextC("Izleme pasif - Alarm Merkezi > TUM AGI IZLE ile baslatin.", 24,
-                cy + 4, 9, COLOR_TEXT_DIM);
+      /* Izleme pasif: once izleme listesine cihaz eklenmeli */
+      DrawTextC("Izleme pasif - izleme listesine cihaz ekleyin, sonra TUM AGI IZLE.",
+                24, cy + 4, 9, COLOR_TEXT_DIM);
       cy += 20;
     }
 
@@ -1608,8 +1655,8 @@ static void draw_panel_tools(int W, int H) {
     }
 
     /* --- Yakalanan paket ozeti --- */
-    static PacketRecord nm_all_packets[2048];
-    static PacketRecord nm_dev_packets[1024];
+    static PacketRecord nm_all_packets[4096];
+    static PacketRecord nm_dev_packets[2048];
     static int nm_dpc = 0;
 
     /* Kendi (spoof) ARP trafigini gizleme icin kendi MAC'imiz */
@@ -1623,18 +1670,19 @@ static void draw_panel_tools(int W, int H) {
     if (show_packets && (!g_nm_flow_paused || g_nm_flow_dirty)) {
       g_nm_flow_dirty = 0;
       nm_dpc = 0;
-      int c = full_monitor_get_packets(nm_all_packets, 2048, 0);
+      int c = full_monitor_get_packets(nm_all_packets, 4096, 0);
       c0 = c;
       /* Display filtre ifadesi de uygulanir (Wireshark tarzi) */
       if (!g_nm_target[0]) {
-        /* Hedef secilmemis: tum ag, IP filtresi yok. En YENI 1024 eslesme
+        /* Hedef secilmemis: tum ag, IP filtresi yok. En YENI 2048 eslesme
          * kalsin: sondan basa topla, sonra kronolojik siraya dondur. */
-        for (int i = c - 1; i >= 0 && nm_dpc < 1024; i--) {
+        for (int i = c - 1; i >= 0 && nm_dpc < 2048; i--) {
           if (g_nm_hide_own_arp && have_own_mac &&
               strcmp(nm_all_packets[i].src_mac, own_mac_buf) == 0)
             continue;
-          /* Izleme listesi kapsami: iki uc da listede yoksa gosterme */
-          if (mon_list_active() && !mon_list_has(nm_all_packets[i].src_ip) &&
+          /* Izleme listesi kapsami: iki uc da listede yoksa gosterme.
+           * BOS liste = kapsam yok -> hicbir paket gosterilmez. */
+          if (!mon_list_has(nm_all_packets[i].src_ip) &&
               !mon_list_has(nm_all_packets[i].dst_ip))
             continue;
           if (filter_engine_packet_matches(&nm_all_packets[i], g_pkt_filter))
@@ -1646,8 +1694,8 @@ static void draw_panel_tools(int W, int H) {
           nm_dev_packets[b] = t;
         }
       } else {
-        /* Secili hedef IP eslesmeleri: En YENI 1024 eslesme kalsin */
-        for (int i = c - 1; i >= 0 && nm_dpc < 1024; i--) {
+        /* Secili hedef IP eslesmeleri: En YENI 2048 eslesme kalsin */
+        for (int i = c - 1; i >= 0 && nm_dpc < 2048; i--) {
           if (g_nm_hide_own_arp && have_own_mac &&
               strcmp(nm_all_packets[i].src_mac, own_mac_buf) == 0)
             continue;
@@ -2606,12 +2654,12 @@ void gui_draw(void) {
         ids_get_alerts_snapshot(g_ids_alerts_snapshot, IDS_MAX_GUI_ALERTS);
     ids_rebuild_alert_view();
     if (g_capture_all) {
-      /* Izleme listesi kapsami: yalnizca listedeki IP'ler spoof edilir.
-       * Bos liste = tum ag (eski davranis). */
+      /* Izleme listesi kapsami: yalnizca listedeki cihazlar spoof edilir.
+       * Bos listede izleme zaten baslatilamaz (capture_start_all kapisi). */
       Device mondevs[MAX_DEVICES];
       int mcnt = 0;
       for (int mi = 0; mi < g_scan.device_count && mcnt < MAX_DEVICES; mi++)
-        if (!mon_list_active() || mon_list_has(g_scan.devices[mi].ip))
+        if (mon_list_has(g_scan.devices[mi].ip))
           mondevs[mcnt++] = g_scan.devices[mi];
       arp_spoof_sync_targets(mondevs, mcnt, g_scan.gateway_ip,
                              g_scan.local_ip);

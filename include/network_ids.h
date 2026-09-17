@@ -57,7 +57,20 @@ typedef struct {
     int         status;         /* IDS_ALERT_STATUS_* (SOC v3 triyaj) */
     char        note[256];      /* analist notu (SOC v3 triyaj) */
     int         port_owner_attacker; /* port sahibi saldirgandir (Meterpreter vb.) */
+    /* --- [DEĞİŞİKLİK 9] Risk skoru sistemi --- */
+    uint8_t     confidence;     /* 0-100: çok düşük kanıt (0) -> kesinleşmiş tehdit (100) */
+    uint8_t     evidence_bits;  /* IDS_EV_* bitleri: hangi kanıtlar birikti */
+    char        fp_reason[64];  /* muhtemel false positive ise nedeni */
 } IdsGuiAlert;
+
+/* --- [DEĞİŞİKLİK 9] Kanıt bitleri (IDS_EV_*) --- */
+#define IDS_EV_THRESHOLD_MET   (1u << 0)  /* eşik aşıldı */
+#define IDS_EV_HANDSHAKE_SEEN  (1u << 1)  /* TCP handshake tamamlandı */
+#define IDS_EV_REPEATED        (1u << 2)  /* birden fazla kez görüldü */
+#define IDS_EV_MULTI_PORT      (1u << 3)  /* çok porta yayıldı */
+#define IDS_EV_PAYLOAD_MATCH   (1u << 4)  /* payload imzası eşleşti */
+#define IDS_EV_EXTERNAL_SRC    (1u << 5)  /* kaynak internet'ten (daha ciddi) */
+#define IDS_EV_KNOWN_BAD_PORT  (1u << 6)  /* bilinen kötü amaçlı port */
 
 /* SOC v3 triyaj durumlari */
 #define IDS_ALERT_STATUS_NEW       0   /* yeni, incelenmedi */
@@ -105,6 +118,8 @@ typedef struct {
     uint32_t    active_flows;       /* LAN katmanı: aktif akış sayısı */
     uint32_t    host_count;         /* LAN katmanı: izlenen host sayısı */
     uint32_t    incident_count;     /* SOC v3: korelasyonlu olay sayısı */
+    /* --- [DEĞİŞİKLİK 8] Adaptif cooldown & dedup --- */
+    uint64_t    suppressed_fps;     /* bastırılan false positive uyarı sayısı */
 } IdsAgent;
 
 extern IdsAgent g_ids;
@@ -136,6 +151,14 @@ void ids_clear_host_data(void);
 /* Kapsam CIDR'i: "192.168.1.0/24" — verilmezse özel ağ aralıkları kullanılır */
 void ids_set_network_range(const char *cidr);
 
+/* ========== İzleme kapsamı API ==========
+ * GUI'deki izleme listesinin IDS motorundaki kopyası. Boş liste = hiçbir
+ * şey izlenmez (paket analizi, uyarı, host/akış üretimi yok); dolu liste =
+ * yalnızca listedeki IP'lere ait paketler işlenir. */
+#define IDS_SCOPE_MAX 128
+void ids_scope_set(const char *ips[], int n);
+void ids_scope_clear(void);
+
 /* ========== SOC v3: korelasyonlu olay + triyaj API ========== */
 typedef struct {
     char        attacker_ip[46];
@@ -155,4 +178,7 @@ int  ids_set_alert_status(int index, int status);
 int  ids_set_alert_note(int index, const char *note);
 
 #endif /* NETWORK_IDS_H */
+
+
+
 

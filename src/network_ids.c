@@ -288,6 +288,9 @@ typedef struct {
     uint32_t count;
     uint32_t unique[64];       /* farklı hedef/port hash'leri */
     int      unique_len;
+    /* --- [DEĞİŞİKLİK 2] Yatay tarama: özel (RFC1918) / genel hedef ayrımı --- */
+    uint32_t private_dst_count;
+    uint32_t public_dst_count;
     time_t   window_start;
     time_t   last_alert;
     int      active;
@@ -331,11 +334,23 @@ static IdsTracker *ids_tracker_get(const char *key) {
     return t;
 }
 
+/* [DEĞİŞİKLİK 14] Yalnızca arama: yoksa kayıt OLUŞTURMAZ (yan etkisiz).
+ * MalPort motorunun tarama istemcisi tespitinde kullanılır. */
+static IdsTracker *ids_tracker_peek(const char *key) {
+    for (int i = 0; i < g_tracker_count; i++) {
+        if (g_trackers[i].active && strcmp(g_trackers[i].key, key) == 0)
+            return &g_trackers[i];
+    }
+    return NULL;
+}
+
 static void ids_tracker_reset_if_expired(IdsTracker *t) {
     time_t now = time(NULL);
     if (now - t->window_start > IDS_WINDOW_SEC) {
         t->count = 0;
         t->unique_len = 0;
+        t->private_dst_count = 0;   /* [DEĞİŞİKLİK 2] */
+        t->public_dst_count = 0;    /* [DEĞİŞİKLİK 2] */
         t->window_start = now;
     }
 }
@@ -379,10 +394,117 @@ static uint32_t ids_sig_flags(const char *sig);
 static void ids_host_credit(uint32_t ip, uint32_t points, uint32_t flag);
 static void ids_host_victim(uint32_t ip, uint32_t points, uint32_t flag);
 
-static int ids_raise_alert(const char *sig, const char *sev, double score,
-                            const IdsPktInfo *pi, const char *desc) {
+/* --- [DEĞİŞİKLİK 8] Global uyarı bastırma (dedup) ---
+ * Aynı (imza, saldırgan, kurban) üçlüsü IDS_DEDUP_TTL (120 sn) içinde ikinci
+ * kez geldiğinde bastırılır ve suppressed_fps sayacı artar. Fallback modunun
+ * aynı SYN'i 2 sn'de bir sentezlemesi gibi tekrarlı akışlar uyarı yağmuruna
+ * dönüşmesin (FP azaltma). ARP olaylarında src_ip 0 kaldığı için saldırgan/
+ * kurban olarak ham çerçevedeki sender/target IP'leri kullanılır. */
+#define IDS_DEDUP_MAX 64
+#define IDS_DEDUP_TTL 120
+
+typedef struct {
+    char     key[96];
+    time_t   ts;
+    int      active;
+} IdsDedupEntry;
+
+static IdsDedupEntry g_dedup[IDS_DEDUP_MAX];
+static int g_dedup_count = 0;
+
+/* 1 döner: yayınla; 0 döner: bastır (suppressed_fps++). */
+static int ids_dedup_check(const char *sig, uint32_t att, uint32_t vic) {
+    if (!sig) return 1;
+    time_t now = time(NULL);
+    char key[96];
+    snprintf(key, sizeof(key), "%s|%u|%u", sig, att, vic);
+    for (int i = 0; i < g_dedup_count; i++) {
+        if (!g_dedup[i].active) continue;
+        if (now - g_dedup[i].ts > IDS_DEDUP_TTL) {
+            g_dedup[i].active = 0;
+            continue;
+        }
+        if (strcmp(g_dedup[i].key, key) == 0) {
+            g_ids.suppressed_fps++;
+            return 0;
+        }
+    }
+    if (g_dedup_count < IDS_DEDUP_MAX) {
+        IdsDedupEntry *d = &g_dedup[g_dedup_count++];
+        d->active = 1;
+        d->ts = now;
+        strncpy(d->key, key, sizeof(d->key) - 1);
+    } else {
+        /* Kap dolu: en eski kaydı geri dönüştür */
+        IdsDedupEntry *old = &g_dedup[0];
+        for (int i = 1; i < IDS_DEDUP_MAX; i++)
+            if (g_dedup[i].ts < old->ts) old = &g_dedup[i];
+        old->active = 1;
+        old->ts = now;
+        strncpy(old->key, key, sizeof(old->key) - 1);
+    }
+    return 1;
+}
+
+/* --- [DEĞİŞİKLİK 9] Kanıt bitlerinden risk skoru (0-100) --- */
+static uint8_t ids_calc_confidence(uint8_t ev, const char *sev) {
+    uint8_t c = 0;
+    if (ev & IDS_EV_THRESHOLD_MET)  c += 30;
+    if (ev & IDS_EV_HANDSHAKE_SEEN) c += 20;
+    if (ev & IDS_EV_REPEATED)       c += 15;
+    if (ev & IDS_EV_MULTI_PORT)     c += 10;
+    if (ev & IDS_EV_PAYLOAD_MATCH)  c += 15;
+    if (ev & IDS_EV_EXTERNAL_SRC)   c += 10;
+    if (ev & IDS_EV_KNOWN_BAD_PORT) c += 20;
+    if (c > 100) c = 100;
+    /* KRITIK şiddeti en az 50 güven ister: ciddi uyarı asla "emin değilim"
+     * etiketiyle sulandırılmasın. */
+    if (sev && strcmp(sev, "KRITIK") == 0 && c < 50) c = 50;
+    return c;
+}
+
+/* Şiddeti bir kademe düşür (düşük güven uyarısı için) */
+static const char *ids_sev_downgrade(const char *sev) {
+    if (!sev) return sev;
+    if (strcmp(sev, "KRITIK") == 0) return "YUKSEK";
+    if (strcmp(sev, "YUKSEK") == 0) return "ORTA";
+    if (strcmp(sev, "ORTA") == 0)   return "DUSUK";
+    return sev;
+}
+
+/* Uyarı üretim çekirdeği. ev_bits==0 veren çağrılar (eski API türevleri)
+ * güven 100 kabul edilir ve şiddet düşürülmez; yeni kural blokları kanıt
+ * bitlerini vererek güven mekanizmasını aktifleştirir. */
+static int ids_raise_alert_ev(const char *sig, const char *sev, double score,
+                              const IdsPktInfo *pi, const char *desc,
+                              uint8_t ev_bits) {
     if (!g_ids.running) return -1;
     platform_mutex_lock(&g_ids_lock);
+
+    /* LAN katmanı saldırgan/kurban: ARP'de src/dst IP alanları 0 kalır,
+     * ham çerçevedeki sender/target IP'leri kullanılır. */
+    uint32_t att = pi->src_ip, vic = pi->dst_ip;
+    if (pi->is_arp) {
+        att = pi->arp_sender_ip;
+        vic = pi->arp_target_ip;
+    }
+
+    /* [DEĞİŞİKLİK 8] Aynı uyarının kısa sürede tekrarı bastırılır */
+    if (!ids_dedup_check(sig, att, vic)) {
+        platform_mutex_unlock(&g_ids_lock);
+        return -1;
+    }
+
+    /* [DEĞİŞİKLİK 9] Risk skoru + düşük kanıtta şiddet indirimi */
+    uint8_t conf = (ev_bits == 0) ? 100 : ids_calc_confidence(ev_bits, sev);
+    char fp_reason[64];
+    fp_reason[0] = '\0';
+    const char *out_sev = sev;
+    if (ev_bits != 0 && conf < 40) {
+        out_sev = ids_sev_downgrade(sev);
+        snprintf(fp_reason, sizeof(fp_reason),
+                 "yetersiz kanit (guven %u/100)", (unsigned)conf);
+    }
 
     IdsGuiAlert *a;
     if (g_alert_count >= IDS_MAX_ALERTS) {
@@ -402,8 +524,12 @@ static int ids_raise_alert(const char *sig, const char *sev, double score,
     a->src_port = pi->src_port;
     a->dst_port = pi->dst_port;
     a->score = score;
-    strncpy(a->severity, sev, sizeof(a->severity) - 1);
+    strncpy(a->severity, out_sev, sizeof(a->severity) - 1);
     strncpy(a->description, desc, sizeof(a->description) - 1);
+    a->confidence = conf;                        /* [DEĞİŞİKLİK 9] */
+    a->evidence_bits = ev_bits;                  /* [DEĞİŞİKLİK 9] */
+    strncpy(a->fp_reason, fp_reason,
+            sizeof(a->fp_reason) - 1);           /* [DEĞİŞİKLİK 9] */
     time_t now = time(NULL);
     struct tm *tm = localtime(&now);
     if (tm) {
@@ -414,24 +540,25 @@ static int ids_raise_alert(const char *sig, const char *sev, double score,
 
     g_ids.total_alerts++;
 
-    /* LAN katmanı: uyarı kaynak/hedef host skorlarına işlenir.
-     * ARP uyarılarında src/dst IP alanları boştur; ham çerçevedeki
-     * sender/target IP'leri kullanılır. */
+    /* LAN katmanı: uyarı kaynak/hedef host skorlarına işlenir (indirilmiş
+     * şiddetle). */
     {
-        uint32_t att = pi->src_ip, vic = pi->dst_ip;
-        if (pi->is_arp) {
-            att = pi->arp_sender_ip;
-            vic = pi->arp_target_ip;
-        }
-        uint32_t pts = ids_sev_points(sev);
+        uint32_t pts = ids_sev_points(out_sev);
         uint32_t fl  = ids_sig_flags(sig);
         ids_host_credit(att, pts, fl);
         ids_host_victim(vic, pts, fl);
-        ids_incident_update(att, vic, sig, sev, score);
+        ids_incident_update(att, vic, sig, out_sev, score);
     }
 
     platform_mutex_unlock(&g_ids_lock);
     return g_alert_count - 1;
+}
+
+/* Eski API: kanıt biti vermeden çağıran tüm mevcut kurallar için uyumluluk
+ * sarmalayıcısı — davranış tamamen korunur (güven 100, düşürme yok). */
+static int ids_raise_alert(const char *sig, const char *sev, double score,
+                            const IdsPktInfo *pi, const char *desc) {
+    return ids_raise_alert_ev(sig, sev, score, pi, desc, 0);
 }
 
 /* ==================================================================
@@ -515,6 +642,8 @@ typedef struct {
     char     dns_domains[40][128]; /* gorulen alan adlari (dedupe) */
     int      dns_pending_alert;    /* DGA uyarisi bekliyor */
     int      dns_pending_tunnel;   /* tunel sezgiseli tuttu */
+    int      dns_long_label_count; /* [D5] 60 sn pencerede uzun label sayisi */
+    time_t   dns_long_label_window;/* [D5] uzun label penceresi baslangici */
     time_t   last_seen;
     int      active;
 } IdsHost;
@@ -526,6 +655,45 @@ static int g_host_count = 0;
  * Normal gezinme trafiği (CDN alt alanlari, PTR, mDNS, yerel adlar)
  * DGA sayilmasin: yalnizca "rastgele gorunumlu" benzersiz
  * kayit-edilebilir alan adlari sayaca girer. */
+
+/* [DEĞİŞİKLİK 5] DGA esikleri: agir yol 60 sorgu + 20 benzersiz SLD;
+ * hafif yol 60 sn pencerede >= 5 uzun alfanumerik label. 25/10 gibi dusuk
+ * esikler normal gezinme trafiginde yanlis pozitif uretiyordu. */
+#define DGA_MIN_QCOUNT        60
+#define DGA_MIN_DCOUNT        20
+#define DGA_LONG_LABEL_MIN    12
+#define DGA_LONG_LABEL_WIN    60
+#define DGA_LONG_LABEL_MAX    5
+
+/* Bilinen guvenilir eTLD+1 alan adlari (CDN, bulut, olcekli servisler):
+ * bu alanlarin sorgulari DGA/tunel sayilmaz; tam karsilastirma yapilir. */
+static const char *k_dns_trusted_domains[] = {
+    "google.com", "googleapis.com", "gstatic.com", "youtube.com",
+    "googlevideo.com", "ggpht.com", "googleusercontent.com",
+    "microsoft.com", "live.com", "msftncsi.com", "windowsupdate.com",
+    "windows.com", "office.com", "office365.com", "microsoftonline.com",
+    "apple.com", "icloud.com", "mzstatic.com", "aaplimg.com",
+    "amazon.com", "amazonaws.com", "cloudfront.net",
+    "cloudflare.com", "cloudflare-dns.com", "akamai.net", "akamaiedge.net",
+    "edgesuite.net", "edgekey.net", "fastly.net", "azureedge.net",
+    "facebook.com", "fbcdn.net", "instagram.com", "whatsapp.com",
+    "twitter.com", "x.com", "twimg.com", "linkedin.com",
+    "netflix.com", "nflxvideo.net", "spotify.com", "scdn.co",
+    "github.com", "githubusercontent.com", "wikipedia.org", "wikimedia.org",
+    "yahoo.com", "bing.com", "duckduckgo.com", "mozilla.org",
+    "adobe.com", "adobedtm.com", "doubleclick.net", "googlesyndication.com",
+    "w3.org", "ietf.org", "isc.org", "ntp.org"
+};
+
+static int ids_domain_trusted(const char *reg) {
+    for (size_t i = 0;
+         i < sizeof(k_dns_trusted_domains) / sizeof(k_dns_trusted_domains[0]);
+         i++) {
+        if (strcmp(reg, k_dns_trusted_domains[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 static const char *k_dns_noise_sfx[] = {
     ".arpa", ".local", ".lan", ".home", ".internal"
 };
@@ -645,6 +813,38 @@ static int ids_ip_in_scope(uint32_t ip) {
     return 0;
 }
 
+/* --- [DEĞİŞİKLİK 2] RFC1918 + loopback + link-local + CGNAT özel adres mi? --- */
+static int ids_ip_is_private(uint32_t ip) {
+    uint8_t a = (uint8_t)(ip >> 24);
+    uint8_t b = (uint8_t)(ip >> 16);
+    if (a == 10) return 1;
+    if (a == 172 && b >= 16 && b <= 31) return 1;
+    if (a == 192 && b == 168) return 1;
+    if (a == 127) return 1;
+    if (a == 169 && b == 254) return 1;
+    if (a == 100 && b >= 64 && b <= 127) return 1; /* CGNAT 100.64.0.0/10 */
+    return 0;
+}
+
+static int ids_is_web_port(uint16_t p) {
+    return (p == 80 || p == 443 || p == 8080 || p == 8443);
+}
+
+static int ids_is_auth_port(uint16_t p) {
+    switch (p) {
+        case 21: case 22: case 23: case 25: case 445:
+        case 1433: case 3306: case 3389: case 5432:
+        case 5900: case 6379:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* --- [DEĞİŞİKLİK 12] Port sınıfları (brute force yanlış pozitif düzeltmesi) ---
+ * Web portları: tarayıcılar bir siteye 6-8 paralel TCP bağlantısı açar;
+ * bu yüzden dış web hedefine giden trafik 'brute force' sayılmamalıdır.
+ * Kimlik doğrulama / uzak erişim portları (auth): brute force hedefidir. */
 /* Akış bul / yoksa pasif veya en eski slotu geri dönüştür */
 static IdsFlow *ids_flow_get(uint32_t src, uint32_t dst, uint16_t sp,
                               uint16_t dp, uint8_t proto, int *created) {
@@ -871,21 +1071,26 @@ static void ids_flow_update(const IdsPktInfo *pi, const PacketRecord *pkt) {
             }
             if (!noise) {
                 char reg[256];
+                time_t now = time(NULL);
                 ids_registrable_domain(qn, reg, (int)sizeof(reg));
                 sh->dns_qcount++;
-                int dup = 0;
-                for (int i = 0; i < (int)sh->dns_dcount && i < 40; i++) {
-                    if (strcmp(sh->dns_domains[i], reg) == 0) { dup = 1; break; }
-                }
-                if (!dup && sh->dns_dcount < 40 && ids_sld_suspicious(reg)) {
-                    strncpy(sh->dns_domains[sh->dns_dcount], reg,
-                            sizeof(sh->dns_domains[0]) - 1);
-                    sh->dns_dcount++;
-                }
+                /* [DEĞİŞİKLİK 5] Guvenilir saglayici (CDN/bulut): DGA/tunel
+                 * sayaci beslenmez; qcount yalnizca istatistik icin artar. */
+                if (!ids_domain_trusted(reg)) {
+                    int dup = 0;
+                    for (int i = 0; i < (int)sh->dns_dcount && i < 40; i++) {
+                        if (strcmp(sh->dns_domains[i], reg) == 0) { dup = 1; break; }
+                    }
+                    if (!dup && sh->dns_dcount < 40 && ids_sld_suspicious(reg)) {
+                        strncpy(sh->dns_domains[sh->dns_dcount], reg,
+                                sizeof(sh->dns_domains[0]) - 1);
+                        sh->dns_dcount++;
+                    }
 
-                /* Tunel sezgiseli (tek seferlik): ilk label >= 12 karakter,
-                 * hem rakam hem harf, tire yok -> DGA/tunel adayı */
-                if (!sh->dns_pending_tunnel) {
+                    /* Tunel + uzun-label sezgiseli: ilk label >=
+                     * DGA_LONG_LABEL_MIN karakter, hem rakam hem harf, tire
+                     * yok. Tunel uyarisi tek seferlik; uzun-label sayaci
+                     * DGA_LONG_LABEL_WIN saniyelik pencerede biriktirilir. */
                     const char *p = qn;
                     int l = 0;
                     while (*p && *p != '.') { l++; p++; }
@@ -896,8 +1101,17 @@ static void ids_flow_update(const IdsPktInfo *pi, const PacketRecord *pkt) {
                         else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) letters++;
                         else if (c == '-') hyph++;
                     }
-                    if (l >= 12 && digits > 0 && letters > 0 && hyph == 0)
-                        sh->dns_pending_tunnel = 1;
+                    if (l >= DGA_LONG_LABEL_MIN && digits > 0 && letters > 0 &&
+                        hyph == 0) {
+                        if (!sh->dns_pending_tunnel) sh->dns_pending_tunnel = 1;
+                        if (sh->dns_long_label_window == 0)
+                            sh->dns_long_label_window = now;
+                        if (now - sh->dns_long_label_window > DGA_LONG_LABEL_WIN) {
+                            sh->dns_long_label_window = now;
+                            sh->dns_long_label_count = 0;
+                        }
+                        sh->dns_long_label_count++;
+                    }
                 }
             }
         }
@@ -964,13 +1178,21 @@ static void ids_flow_analysis(void) {
             h->victim_score += 20;
             if (h->victim_score > 100) h->victim_score = 100;
         }
-        /* Brute force: aynı port grubunda >= 6 akış ve >= 4 farklı kaynak port */
+        /* Brute force: aynı port grubunda >= 6 akış ve >= 4 farklı kaynak port.
+         * [DEĞİŞİKLİK 12] Yanlış pozitif düzeltmesi: web portları (80/443/
+         * 8080/8443) için dağıtık koşul normal tarayıcı davranışını (6-8
+         * paralel bağlantı) saldırı sanıyordu. Web portlarında artık TEK
+         * kaynağın akış sayısı belirleyici: bir kaynak >= 15 akış getirirse
+         * bu bir fırtına (saldırı) kabul edilir. */
         if (h->flows_as_dst >= 6 && !(h->flags & IDS_F_BRUTEFORCE)) {
             typedef struct {
                 uint16_t port;
                 uint32_t count;
                 uint16_t src_ports[32];
                 int spn;
+                uint32_t srcs[8];   /* kaynak IP'ler (web fırtına kontrolü) */
+                uint16_t srcn[8];   /* kaynak IP başına akış sayısı */
+                int src_count;
             } BruteBucket;
             BruteBucket bb[16];
             int bn = 0;
@@ -985,6 +1207,9 @@ static void ids_flow_analysis(void) {
                     bb[b].port = f->dst_port;
                     bb[b].count = 0;
                     bb[b].spn = 0;
+                    bb[b].src_count = 0;
+                    memset(bb[b].srcs, 0, sizeof(bb[b].srcs));
+                    memset(bb[b].srcn, 0, sizeof(bb[b].srcn));
                 }
                 if (b < 0) continue;
                 bb[b].count++;
@@ -995,9 +1220,28 @@ static void ids_flow_analysis(void) {
                     if (k == bb[b].spn)
                         bb[b].src_ports[bb[b].spn++] = f->src_port;
                 }
+                /* kaynak IP başına sayaç (web fırtına tespiti) */
+                int si = -1;
+                for (int j = 0; j < bb[b].src_count; j++)
+                    if (bb[b].srcs[j] == f->src_ip) { si = j; break; }
+                if (si < 0 && bb[b].src_count < 8) {
+                    si = bb[b].src_count++;
+                    bb[b].srcs[si] = f->src_ip;
+                    bb[b].srcn[si] = 0;
+                }
+                if (si >= 0) bb[b].srcn[si]++;
             }
             for (int b = 0; b < bn; b++) {
-                if (bb[b].count >= 6 && bb[b].spn >= 4) {
+                int hit = 0;
+                if (ids_is_web_port(bb[b].port)) {
+                    /* Web: tek kaynaktan >= 15 akış = fırtına (saldırı) */
+                    for (int j = 0; j < bb[b].src_count; j++)
+                        if (bb[b].srcn[j] >= 15) { hit = 1; break; }
+                } else {
+                    /* Servis portları: dağıtık brute force koşulu korunur */
+                    hit = (bb[b].count >= 6 && bb[b].spn >= 4);
+                }
+                if (hit) {
                     h->flags |= IDS_F_BRUTEFORCE;
                     h->victim_score += 25;
                     if (h->victim_score > 100) h->victim_score = 100;
@@ -1007,11 +1251,23 @@ static void ids_flow_analysis(void) {
         }
 
         /* ---- SOC v3: DNS DGA / tunel analizi (saniyede bir) ---- */
-        if (h->dns_qcount >= 25 && h->dns_dcount >= 10 && !(h->flags & IDS_F_DNS)) {
-            h->flags |= IDS_F_DNS;
-            h->dns_pending_alert = 1;
-            h->attack_score += 10;
-            if (h->attack_score > 100) h->attack_score = 100;
+        /* [DEĞİŞİKLİK 5] Iki bagimsiz kanit yolu:
+         * 1) agir esik: DGA_MIN_QCOUNT sorgu + DGA_MIN_DCOUNT benzersiz SLD
+         * 2) hafif esik: DGA_LONG_LABEL_WIN sn pencerede >= DGA_LONG_LABEL_MAX
+         *    uzun alfanumerik label (guven dusuk -> sev YUKSEK) */
+        {
+            int dga_hit = (h->dns_qcount >= DGA_MIN_QCOUNT &&
+                           h->dns_dcount >= DGA_MIN_DCOUNT);
+            if (!dga_hit && h->dns_long_label_window &&
+                now - h->dns_long_label_window <= DGA_LONG_LABEL_WIN &&
+                h->dns_long_label_count >= DGA_LONG_LABEL_MAX)
+                dga_hit = 1;
+            if (dga_hit && !(h->flags & IDS_F_DNS)) {
+                h->flags |= IDS_F_DNS;
+                h->dns_pending_alert = 1;
+                h->attack_score += 10;
+                if (h->attack_score > 100) h->attack_score = 100;
+            }
         }
         if (h->dns_pending_alert) {
             h->dns_pending_alert = 0;
@@ -1020,11 +1276,18 @@ static void ids_flow_analysis(void) {
             pi.src_ip = h->ip;
             pi.is_udp = 1;
             char dgadesc[128];
+            const char *dga_sev = "KRITIK";
+            uint8_t dga_ev = IDS_EV_REPEATED | IDS_EV_PAYLOAD_MATCH;
+            if (!(h->dns_qcount >= DGA_MIN_QCOUNT &&
+                  h->dns_dcount >= DGA_MIN_DCOUNT)) {
+                dga_sev = "YUKSEK";   /* hafif esik: guven dusuk */
+                dga_ev = IDS_EV_REPEATED;
+            }
             snprintf(dgadesc, sizeof(dgadesc),
                      "%u sorgu / %u benzersiz alan adi (olasi DGA)",
                      h->dns_qcount, h->dns_dcount);
-            ids_raise_alert("DGA Suphesi (C2)", "KRITIK", SCORE_KRITIK, &pi,
-                            dgadesc);
+            ids_raise_alert_ev("DGA Suphesi (C2)", dga_sev, SCORE_KRITIK, &pi,
+                               dgadesc, dga_ev);
         }
         if (h->dns_pending_tunnel && !(h->flags & IDS_F_TUNNEL)) {
             h->flags |= IDS_F_TUNNEL;
@@ -1182,6 +1445,71 @@ void ids_clear_host_data(void) {
  *   KURAL EŞİKLERİ
  * ================================================================== */
 
+/* --- [DEĞİŞİKLİK 2] Yaygın/well-known port mu? (yatay tarama eşik seçimi) --- */
+static int ids_port_is_wellknown(uint16_t p) {
+    switch (p) {
+        case 20: case 21: case 22: case 23: case 25: case 53: case 80:
+        case 110: case 143: case 443: case 445: case 465: case 587:
+        case 993: case 995: case 3306: case 3389: case 5432: case 6379:
+        case 8080: case 8443:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* --- [DEĞİŞİKLİK 1+EK] "Ortak servis" portları: bilinmeyen yüksek port
+ * dinleme tespitinde (level 0) bunlar şüphe sayılmaz (FP önleme) --- */
+static int ids_port_is_common_service(uint16_t p) {
+    switch (p) {
+        case 21: case 22: case 23: case 25: case 53: case 67: case 68:
+        case 80: case 110: case 123: case 137: case 138: case 139: case 143:
+        case 161: case 389: case 443: case 445: case 465: case 514:
+        case 587: case 631: case 636: case 873: case 993: case 995:
+        case 1080: case 1433: case 1521: case 3306: case 3389: case 5432:
+        case 5900: case 5901: case 6379: case 8080: case 8443: case 8888:
+        case 11211: case 27017: case 5353:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* --- [DEĞİŞİKLİK 4] Binary protokol portları: shellcode eşiği burada yükselir --- */
+static int ids_port_is_binary_proto(uint16_t p) {
+    switch (p) {
+        case 445: case 139: case 137: case 138:   /* SMB/NetBIOS */
+        case 3306: case 5432:                     /* MySQL/PostgreSQL */
+        case 27017: case 6379: case 11211:        /* MongoDB/Redis/Memcached */
+        case 3389: case 5900: case 5901:          /* RDP/VNC */
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* --- [DEĞİŞİKLİK 6] TLS portları: şifreli içerikte payload imzası aranmaz --- */
+static int ids_port_is_tls(uint16_t p) {
+    switch (p) {
+        case 443: case 8443: case 465: case 993: case 995: case 587:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* --- [DEĞİŞİKLİK 10] Ağ büyüklüğüne göre adaptif eşik çarpanı:
+ * host sayısı arttıkça eşikler büyür (küçük ağlarda normal trafik
+ * bile tarama gibi görünebildiği için burada ölçeklenir). --- */
+static double ids_adaptive_multiplier(void) {
+    uint32_t h = g_ids.host_count;
+    if (h < 8)  return 1.0;
+    if (h < 16) return 1.5;
+    if (h < 32) return 2.0;
+    if (h < 64) return 2.5;
+    return 3.0;
+}
+
 static const char *brute_force_name(uint16_t dport) {
     switch (dport) {
         case 22:   return "SSH Brute Force";
@@ -1193,17 +1521,9 @@ static const char *brute_force_name(uint16_t dport) {
         case 23:   return "Telnet Brute Force";
         case 80:
         case 443:
-        case 8080: return "Web Brute Force";
+        case 8080:
+        case 8443: return "Web Brute Force";   /* [DEĞİŞİKLİK 12] */
         default:   return "Brute Force";
-    }
-}
-
-static const char *brute_force_sev(uint16_t dport) {
-    switch (dport) {
-        case 80:
-        case 443:
-        case 8080: return "ORTA";
-        default:   return "KRITIK";
     }
 }
 
@@ -1212,11 +1532,17 @@ static const char *brute_force_sev(uint16_t dport) {
  * ================================================================== */
 
 #define IDS_BIND_MAX     256
-#define IDS_BIND_STABLE  2   /* degisiklik uyarisi icin gereken kararli gozlem */
+#define IDS_BIND_STABLE  5   /* [D6] degisiklik uyarisi icin gereken kararli gozlem */
+#define IDS_BIND_ALERT_COOLDOWN 300 /* [D6] binding uyari susturma (sn) */
+#define IDS_BIND_FAST_WIN 5   /* [D6] hizli (spoof) degisim penceresi (sn) */
 
 typedef struct {
     uint32_t ip;
     uint8_t  mac[6];
+    uint8_t  prev_mac[6];  /* [D6] degisiklik oncesi MAC (kanit/rapor) */
+    int      mac_change_count; /* [D6] toplam MAC degisiklik sayisi */
+    time_t   first_change; /* [D6] ilk degisiklik zamani */
+    time_t   last_change;  /* [D6] son degisiklik zamani (hizli penceresi) */
     int      seen;          /* bu MAC ile gozlenme sayisi */
     time_t   last_seen;
     time_t   last_alert;
@@ -1280,23 +1606,53 @@ static void ids_learn_binding(const IdsPktInfo *pi) {
     if (memcmp(b->mac, pi->src_mac, 6) != 0) {
         if (b->seen >= IDS_BIND_STABLE) {
             time_t now = time(NULL);
-            if (now - b->last_alert >= IDS_ALERT_COOLDOWN) {
-                char desc[128];
+            /* [D6] Hizli degisim: son degisimden IDS_BIND_FAST_WIN sn icinde
+             * yeni bir degisim geldi -> roam degil, aktif spoof kabul et.
+             * (Roam/aparat MAC'i tek seferlik degisir; spoof titrestirir.) */
+            int fast = (b->last_change &&
+                        now - b->last_change <= IDS_BIND_FAST_WIN &&
+                        b->mac_change_count >= 1);
+            if (fast || now - b->last_alert >= IDS_BIND_ALERT_COOLDOWN) {
+                char desc[160];
                 char ip[46];
                 ids_ip_to_str(claim_ip, ip, sizeof(ip));
                 b->last_alert = now;
-                snprintf(desc, sizeof(desc),
-                         "%s icin MAC %02x:%02x:%02x:%02x:%02x:%02x -> "
-                         "%02x:%02x:%02x:%02x:%02x:%02x degisti (spoof/roam?)",
-                         ip,
-                         b->mac[0], b->mac[1], b->mac[2],
-                         b->mac[3], b->mac[4], b->mac[5],
-                         pi->src_mac[0], pi->src_mac[1], pi->src_mac[2],
-                         pi->src_mac[3], pi->src_mac[4], pi->src_mac[5]);
-                ids_raise_alert("IP-MAC Eslesme Degisikligi", "YUKSEK",
-                                SCORE_YUKSEK, pi, desc);
+                if (fast) {
+                    snprintf(desc, sizeof(desc),
+                             "%s icin MAC %02x:%02x:%02x:%02x:%02x:%02x -> "
+                             "%02x:%02x:%02x:%02x:%02x:%02x; son %d sn icinde "
+                             "%d. degisim (aktif spoof)",
+                             ip,
+                             b->mac[0], b->mac[1], b->mac[2],
+                             b->mac[3], b->mac[4], b->mac[5],
+                             pi->src_mac[0], pi->src_mac[1], pi->src_mac[2],
+                             pi->src_mac[3], pi->src_mac[4], pi->src_mac[5],
+                             IDS_BIND_FAST_WIN, b->mac_change_count + 1);
+                } else {
+                    snprintf(desc, sizeof(desc),
+                             "%s icin MAC %02x:%02x:%02x:%02x:%02x:%02x -> "
+                             "%02x:%02x:%02x:%02x:%02x:%02x degisti "
+                             "(spoof/roam?)",
+                             ip,
+                             b->mac[0], b->mac[1], b->mac[2],
+                             b->mac[3], b->mac[4], b->mac[5],
+                             pi->src_mac[0], pi->src_mac[1], pi->src_mac[2],
+                             pi->src_mac[3], pi->src_mac[4], pi->src_mac[5]);
+                }
+                ids_raise_alert_ev(
+                    "IP-MAC Eslesme Degisikligi",
+                    fast ? "KRITIK" : "YUKSEK",
+                    fast ? SCORE_KRITIK : SCORE_YUKSEK, pi, desc,
+                    fast ? (IDS_EV_REPEATED | IDS_EV_THRESHOLD_MET)
+                         : IDS_EV_THRESHOLD_MET);
             }
         }
+        /* Kanit izi: onceki MAC + zaman damgalari ve sayac guncellenir */
+        time_t now = time(NULL);
+        memcpy(b->prev_mac, b->mac, 6);
+        if (b->first_change == 0) b->first_change = now;
+        b->last_change = now;
+        b->mac_change_count++;
         memcpy(b->mac, pi->src_mac, 6);
         b->seen = 1;
     } else if (b->seen < IDS_BIND_STABLE) {
@@ -1335,13 +1691,16 @@ static const IdsSig g_sigs[] = {
     { "whoami",        "Komut Calistirma (whoami)",    "YUKSEK", SCORE_YUKSEK, 1 },
     { "<?php",         "PHP Kodu Enjeksiyonu",         "YUKSEK", SCORE_YUKSEK, 1 },
     { "eval(",         "Kod Enjeksiyonu (eval)",       "YUKSEK", SCORE_YUKSEK, 1 },
-    /* Powershell / yuk indirme — her iki yon */
-    { "powershell",    "PowerShell Komutu",            "YUKSEK", SCORE_YUKSEK, 0 },
-    { "-enc",          "PowerShell EncodedCommand",    "KRITIK", SCORE_KRITIK, 1 },
+    /* Powershell / yuk indirme — [DEĞİŞİKLİK 7] yalniz istek yonu ve
+     * dusuk guven: bu sozcukler servis yanitlarinda, paket yoneticisi
+     * (apt/wget), CI/CD ve betik trafiginde yaygin gecer; base64 imzasi
+     * kaldirildi (JWT/veri-URI/ssh anahtari gibi zararsiz icerikte
+     * surekli gecen en gurultulu sozcuklerden biriydi). */
+    { "powershell",    "PowerShell Komutu",            "ORTA",   SCORE_ORTA,   1 },
+    { "-enc",          "PowerShell EncodedCommand",    "YUKSEK", SCORE_YUKSEK, 1 },
     { "IEX(",          "PowerShell IEX",               "KRITIK", SCORE_KRITIK, 1 },
-    { "wget ",         "Yuk Indirme (wget)",           "ORTA",   SCORE_ORTA,   0 },
-    { "curl ",         "Yuk Indirme (curl)",           "ORTA",   SCORE_ORTA,   0 },
-    { "base64",        "Base64 Kodlanmis Yuk",         "ORTA",   SCORE_ORTA,   0 },
+    { "wget ",         "Yuk Indirme (wget)",           "DUSUK",  SCORE_DUSUK,  1 },
+    { "curl ",         "Yuk Indirme (curl)",           "DUSUK",  SCORE_DUSUK,  1 },
     /* Log4Shell (JNDI) */
     { "jndi:",         "Log4Shell (JNDI)",             "KRITIK", SCORE_KRITIK, 0 },
     { "${jndi:",       "Log4Shell (JNDI ekspr.)",      "KRITIK", SCORE_KRITIK, 0 },
@@ -1375,6 +1734,21 @@ static int ids_mem_has_run(const uint8_t *p, int n, uint8_t byte, int min_run) {
         }
     }
     return 0;
+}
+
+/* --- [DEĞİŞİKLİK 4] Yüksek entropili (şifreli/komprese) payload mı?
+ * TLS/şifreli tüneller ve arşiv akışları NOP/INT3 gibi yapısal imzaları
+ * rastgele üretebildiği için burada kontrol atlanır (FP önleme). --- */
+static int ids_payload_likely_encrypted(const uint8_t *p, int n) {
+    int lim = n < 64 ? n : 64;
+    if (lim < 32) return 0;
+    uint8_t seen[256];
+    memset(seen, 0, sizeof(seen));
+    int uniq = 0;
+    for (int i = 0; i < lim; i++) {
+        if (!seen[p[i]]) { seen[p[i]] = 1; uniq++; }
+    }
+    return uniq >= 40;   /* 64 baytta 40+ farklı değer: yüksek entropi */
 }
 
 /* Payload'i alintiya cevir: basilabilir karakterler aynen, digerleri "..." */
@@ -1411,12 +1785,20 @@ static void ids_check_payload(const IdsPktInfo *pi) {
     IdsTracker *tr;
 
     if (!p || n <= 0) return;
+    /* [DEĞİŞİKLİK 8] TLS portlari: icerik sifreli oldugu icin imza
+     * aramasi yalnizca yanlis pozitif uretir (sifreli baytlar desen
+     * taklit edebilir). */
+    if (ids_port_is_tls(pi->src_port) || ids_port_is_tls(pi->dst_port)) return;
     scan = n < IDS_PAYLOAD_SCAN ? n : IDS_PAYLOAD_SCAN;
 
     /* IsteK yonu: kaynak port >= 1024 ise istemci istegi kabul et.
      * Servis yanitlarinda (sport < 1024, orn. 80/443/53) yalnizca
      * request_only olmayan imzalar aranir. */
     is_request = (pi->src_port >= 1024);
+
+    /* [DEĞİŞİKLİK 8] Yuksek entropili (sifreli/komprese) akis: L7 imzasi
+     * ve sled aramasi anlamsizdir; rastgele baytlar yanlis eslesme yapar. */
+    if (ids_payload_likely_encrypted(p, n)) return;
 
     for (i = 0; i < IDS_SIG_COUNT; i++) {
         const IdsSig *sg = &g_sigs[i];
@@ -1435,8 +1817,12 @@ static void ids_check_payload(const IdsPktInfo *pi) {
         ids_raise_alert(sg->sig, sg->sev, sg->score, pi, desc);
     }
 
-    /* Shellcode sled'leri: NOP (0x90) / INT3 (0xCC) serileri */
-    if (ids_mem_has_run(p, n, 0x90, 8)) {
+    /* Shellcode sled'leri: NOP (0x90) / INT3 (0xCC) serileri.
+     * [DEĞİŞİKLİK 8] Esik normalde 16; binary protokol portlarinda 32
+     * (SMB/DB akislarinda 0x90/0xCC rastgele dolgu olarak gorulebilir). */
+    int sl_edge = (ids_port_is_binary_proto(pi->src_port) ||
+                   ids_port_is_binary_proto(pi->dst_port)) ? 32 : 16;
+    if (ids_mem_has_run(p, n, 0x90, sl_edge)) {
         snprintf(k2, sizeof(k2), "G|NOP|%u", pi->src_ip);
         tr = ids_tracker_get(k2);
         if (tr) {
@@ -1444,13 +1830,13 @@ static void ids_check_payload(const IdsPktInfo *pi) {
             if (ids_tracker_can_alert(tr)) {
                 ids_excerpt(p, scan < 48 ? scan : 48, ex, sizeof(ex));
                 snprintf(desc, sizeof(desc),
-                         ">=8 ardIsIk NOP (0x90) | ilk veri: %s", ex);
+                         ">=%d ardIsIk NOP (0x90) | ilk veri: %s", sl_edge, ex);
                 ids_raise_alert("Shellcode (NOP-sled)", "KRITIK", SCORE_KRITIK,
                                 pi, desc);
             }
         }
     }
-    if (ids_mem_has_run(p, n, 0xCC, 8)) {
+    if (ids_mem_has_run(p, n, 0xCC, sl_edge)) {
         snprintf(k2, sizeof(k2), "G|INT3|%u", pi->src_ip);
         tr = ids_tracker_get(k2);
         if (tr) {
@@ -1458,7 +1844,7 @@ static void ids_check_payload(const IdsPktInfo *pi) {
             if (ids_tracker_can_alert(tr)) {
                 ids_excerpt(p, scan < 48 ? scan : 48, ex, sizeof(ex));
                 snprintf(desc, sizeof(desc),
-                         ">=8 ardIsIk INT3 (0xCC) | ilk veri: %s", ex);
+                         ">=%d ardIsIk INT3 (0xCC) | ilk veri: %s", sl_edge, ex);
                 ids_raise_alert("Shellcode (INT3-sled)", "KRITIK", SCORE_KRITIK,
                                 pi, desc);
             }
@@ -1466,9 +1852,298 @@ static void ids_check_payload(const IdsPktInfo *pi) {
     }
 }
 
+/* ==================================================================
+ *   [DEĞİŞİKLİK 1+EK] AKILLI MAL-PORT / DİNLEME SERVİSİ MOTORU
+ *
+ *   "4444 = Meterpreter" tarzı sabit kalıp mantığı terk edildi: port
+ *   listeleri yalnızca hızlandırıcı/öncelik vericidir; asıl motor
+ *   "bir makinede dışarıya dinleme yapılıyor mu" sorusuna odaklanır.
+ *
+ *   Katmanlar:
+ *     level 2 = bilinen kötü amaçlı port (critical): HER yönde, iç-iç
+ *               dahil — KRITIK
+ *     level 1 = şüpheli yüksek port (suspicious): iç-iç (local-local)
+ *               hariç — YUKSEK
+ *     level 0 = bilinmeyen YÜKSEK portta dinleme: yalnızca yerel
+ *               dinleyici + dış istemci — ORTA (genelleştirilmiş
+ *               "port dinleme" tespiti, kullanıcı talebi)
+ *
+ *   Uyarı kapısı (EK gereksinim): yalnızca
+ *     connection_count >= 2  VEYA  (syn_seen && data_seen)
+ *   ise uyarı üretilir; açıklama mesajı birikmiş kanıtları listeler.
+ *   connection_count yalnızca SYN-ACK ile artar; SYN girişimleri
+ *   attempt_count olarak ayrıca izlenir. Yerel servis istisnası:
+ *   dinleyicinin akış sayısı (flows_as_dst) >= 3 ise KRITIK -> YUKSEK.
+ * ================================================================== */
+
+#define IDS_MP_MAX        64
+#define IDS_MP_TIMEOUT    300   /* pasif kayıt düşme süresi (sn) */
+#define IDS_MP_ALERT_CD   120   /* aynı (listener,client,port) uyarı arası (sn) */
+
+typedef struct {
+    char     key[64];          /* "MP|<listener>|<client>|<port>" */
+    uint32_t listener_ip;      /* dinleyen (hedef) taraf */
+    uint32_t client_ip;        /* bağlanan (kaynak) taraf */
+    uint16_t port;
+    int      level;            /* 0=bilinmeyen yüksek port, 1=suspicious, 2=critical */
+    int      syn_seen;         /* SYN gördük mü */
+    int      synack_seen;      /* SYN-ACK gördük mü */
+    int      data_seen;        /* veri paketi gördük mü */
+    time_t   first_ts;         /* ilk görülme zamanı */
+    time_t   last_seen;
+    time_t   last_alert;
+    uint32_t connection_count; /* SYN-ACK ile tamamlanan bağlantı sayısı */
+    uint32_t attempt_count;    /* toplam SYN girişimi */
+    int      active;
+} IdsMalPortState;
+
+static IdsMalPortState g_malport[IDS_MP_MAX];
+static int g_malport_count = 0;
+
+/* [DEĞİŞİKLİK 1] Bilinen kötü amaçlı/C2/RAT portları (level 2 — hızlandırıcı) */
+static const uint16_t k_mal_ports_critical[] = {
+    4444, 4445, 31337, 31338, 54320, 54321, 5555,
+    6666, 6667, 1090, 1099, 1524, 12345, 27374, 22222
+};
+#define K_MAL_CRIT_N (int)(sizeof(k_mal_ports_critical) / sizeof(k_mal_ports_critical[0]))
+
+/* [DEĞİŞİKLİK 1] Normal ağda nadir görülen yönetim/RAT benzeri yüksek
+ * portlar (level 1 — iç-iç kullanım uyarı üretmez) */
+static const uint16_t k_mal_ports_suspicious[] = {
+    4443, 7001, 8001, 8081, 9001, 10001, 20000, 4446, 4555
+};
+#define K_MAL_SUSP_N (int)(sizeof(k_mal_ports_suspicious) / sizeof(k_mal_ports_suspicious[0]))
+
+static int ids_malport_level(uint16_t port) {
+    for (int i = 0; i < K_MAL_CRIT_N; i++)
+        if (k_mal_ports_critical[i] == port) return 2;
+    for (int i = 0; i < K_MAL_SUSP_N; i++)
+        if (k_mal_ports_suspicious[i] == port) return 1;
+    return 0;
+}
+
+static IdsMalPortState *ids_malport_find(uint32_t listener, uint32_t client,
+                                         uint16_t port) {
+    for (int i = 0; i < g_malport_count; i++) {
+        IdsMalPortState *m = &g_malport[i];
+        if (!m->active) continue;
+        if (m->listener_ip == listener && m->client_ip == client &&
+            m->port == port)
+            return m;
+        /* veri paketleri ters yönde gelebilir: listener/client takası */
+        if (m->listener_ip == client && m->client_ip == listener &&
+            m->port == port)
+            return m;
+    }
+    return NULL;
+}
+
+static IdsMalPortState *ids_malport_alloc(uint32_t listener, uint32_t client,
+                                          uint16_t port, int level) {
+    time_t now = time(NULL);
+    IdsMalPortState *victim = NULL;
+    for (int i = 0; i < g_malport_count; i++) {
+        IdsMalPortState *m = &g_malport[i];
+        if (!m->active) { victim = m; break; }
+    }
+    if (!victim && g_malport_count < IDS_MP_MAX)
+        victim = &g_malport[g_malport_count++];
+    if (!victim) {
+        /* Kap dolu: en eski kaydı geri dönüştür */
+        victim = &g_malport[0];
+        for (int i = 1; i < g_malport_count; i++)
+            if (g_malport[i].last_seen < victim->last_seen)
+                victim = &g_malport[i];
+    }
+    memset(victim, 0, sizeof(*victim));
+    victim->active = 1;
+    victim->listener_ip = listener;
+    victim->client_ip = client;
+    victim->port = port;
+    victim->level = level;
+    victim->first_ts = now;
+    victim->last_seen = now;
+    snprintf(victim->key, sizeof(victim->key), "MP|%u|%u|%u",
+             listener, client, (unsigned)port);
+    return victim;
+}
+
+/* Dinleyicinin hedef olduğu aktif akış sayısı (yerel servis istisnası) */
+static int ids_flow_count_as_dst(uint32_t ip) {
+    int c = 0;
+    for (int i = 0; i < IDS_MAX_FLOWS; i++)
+        if (g_flows[i].active && g_flows[i].dst_ip == ip) c++;
+    return c;
+}
+
+/* TCP paketini dinleme motoruna besler (ids_check_rules içinden çağrılır) */
+static void ids_malport_feed(const IdsPktInfo *pi) {
+    if (!pi->is_tcp || !pi->dst_port) return;
+
+    /* [DEĞİŞİKLİK 1+EK] Zaman asimi: IDS_MP_TIMEOUT (300 sn) sure pasif
+     * kalan kayitlar dusulur — suphe zamanla gecerliligini yitirir, aksi
+     * halde eski kayitlar kabi doldurup gercek kayitlari geri donusturur.
+     * (ids_flow_analysis bu tanimdan once geldigi icin temizlik burada
+     * yapilir; maliyet kayit basina bir karsilastirmadir.) */
+    time_t now0 = time(NULL);
+    for (int i = 0; i < g_malport_count; i++) {
+        if (g_malport[i].active &&
+            now0 - g_malport[i].last_seen > IDS_MP_TIMEOUT)
+            g_malport[i].active = 0;
+    }
+
+    int is_syn    = (pi->tcp_flags & 0x02) && !(pi->tcp_flags & 0x10);
+    int is_synack = (pi->tcp_flags & 0x12) == 0x12;
+    int has_data  = (pi->payload && pi->payload_len > 0);
+    if (!is_syn && !is_synack && !has_data) return;
+
+    /* Yön tayini: SYN'de dinleyici hedef (dst) taraftır; SYN-ACK'te
+     * kaynak tarafa döner. Veri paketinde SYN yönü esas alınır. */
+    uint32_t listener, client;
+    uint16_t port;
+    if (is_syn) {
+        listener = pi->dst_ip;
+        client   = pi->src_ip;
+        port     = pi->dst_port;
+    } else if (is_synack) {
+        listener = pi->src_ip;
+        client   = pi->dst_ip;
+        port     = pi->src_port;
+    } else {
+        listener = pi->dst_ip;
+        client   = pi->src_ip;
+        port     = pi->dst_port;
+    }
+    if (!listener || !client) return;
+
+    /* [DEĞİŞİKLİK 14] Tarama istemcisi ayrımı: aynı kaynak 10 sn
+     * penceresinde 8+ farklı hedef porta SYN attıysa bu bir port
+     * taramasıdır; tarama SYN'leri dinleme kanıtı olarak kayda
+     * geçirilmez (taramanın kendisi S| kuralından alarm üretir).
+     * nmap'in açık porta bağlanması "Dinleme Servisi" alarmı DEĞİL. */
+    if (is_syn) {
+        char sk[32];
+        snprintf(sk, sizeof(sk), "S|%u", pi->src_ip);
+        IdsTracker *st = ids_tracker_peek(sk);
+        if (st) {
+            ids_tracker_reset_if_expired(st);
+            if (st->unique_len >= 8) return;
+        }
+    }
+
+    IdsMalPortState *m = ids_malport_find(listener, client, port);
+
+    /* [DEĞİŞİKLİK 14] Yetim SYN-ACK: eşleşen SYN kanıtı olmayan SYN-ACK
+     * dinleme kanıtı değildir. Self kaynaklı tarama SYN'leri (kendi
+     * makinemizden nmap vb.) self filtresiyle bastırıldığında, hedefin
+     * SYN-ACK cevapları buraya yetim olarak ulaşıyor ve kayıt açıp
+     * connection_count sayarak YANLIŞ "Dinleme Servisi (Kritik Port)"
+     * alarmı üretiyordu (ekranda: "2 tamamlanan baglanti, 0 SYN"). */
+    if (is_synack && !m) return;
+
+    /* Kayıt yoksa oluşturma koşulları:
+     * - level 2 (critical): her yön, iç-iç dahil
+     * - level 1 (suspicious): her yön (uyarı aşamasında iç-iç elenir)
+     * - level 0: yalnızca SYN yönünde; yerel dinleyici + dış istemci +
+     *   yüksek port + ortak servis değil */
+    if (!m) {
+        int lvl = ids_malport_level(port);
+        if (lvl == 0) {
+            if (!is_syn) return;                    /* bilinmeyen porta yalnız SYN açar */
+            if (port < 1024) return;
+            if (ids_port_is_common_service(port)) return;
+            if (!ids_ip_in_scope(listener)) return; /* dinleyici yerel olmalı */
+            if (ids_ip_in_scope(client)) return;    /* istemci dışarıdan olmalı */
+        }
+        m = ids_malport_alloc(listener, client, port, lvl);
+    }
+    if (!m) return;
+
+    if (is_syn) {
+        m->syn_seen = 1;
+        m->attempt_count++;
+    } else if (is_synack) {
+        if (!m->syn_seen) return;  /* [DEĞİŞİKLİK 14] SYN'siz cevap sayılmaz */
+        m->synack_seen = 1;
+        m->connection_count++;
+    } else {
+        m->data_seen = 1;
+    }
+    m->last_seen = time(NULL);
+
+    /* EK gereksinim kapısı: [DEĞİŞİKLİK 14] gerçek istemci teması
+     * (SYN geldi + dinleyici SYN-ACK ile cevapladı) ilk bağlantıda
+     * uyarı üretir; eskiden 2. bağlantı veya veri bekleniyordu ve
+     * gerçek dinleme dakikalar sonra ancak uyarı verebiliyordu.
+     * Fallback modunda yalnız SYN görülür (SYN-ACK yok) — o zaman
+     * bilinçli olarak uyarı verilmez. */
+    int gate = (m->connection_count >= 2) ||
+               (m->syn_seen && m->data_seen) ||
+               (m->syn_seen && m->synack_seen);
+    if (!gate) return;
+
+    time_t now = m->last_seen;
+    if (now - m->last_alert < IDS_MP_ALERT_CD) return;
+    m->last_alert = now;
+
+    /* Şiddet: level bazlı + yerel servis istisnası */
+    const char *sev;
+    double score;
+    uint8_t ev = IDS_EV_THRESHOLD_MET | IDS_EV_KNOWN_BAD_PORT;
+    if (m->level == 2) {
+        sev = "KRITIK"; score = SCORE_KRITIK;
+        /* Dinleyici çok sayıda akışa hizmet veriyorsa gerçek bir yerel
+         * servistir: KRITIK -> YUKSEK (FP önleme) */
+        if (ids_flow_count_as_dst(listener) >= 3) {
+            sev = "YUKSEK"; score = SCORE_YUKSEK;
+        }
+    } else if (m->level == 1) {
+        /* İç-iç (local-local) şüpheli port kullanımı FP riski yüksek */
+        if (ids_ip_in_scope(listener) && ids_ip_in_scope(client)) return;
+        sev = "YUKSEK"; score = SCORE_YUKSEK;
+    } else {
+        if (ids_ip_in_scope(client)) return;        /* güvenlik kopyası */
+        sev = "ORTA"; score = SCORE_ORTA;
+        ev = IDS_EV_THRESHOLD_MET;                  /* KNOWN_BAD_PORT yok */
+    }
+    if (m->connection_count >= 2) ev |= IDS_EV_REPEATED;
+    if (m->synack_seen)           ev |= IDS_EV_HANDSHAKE_SEEN;
+    if (!ids_ip_in_scope(client)) ev |= IDS_EV_EXTERNAL_SRC;
+
+    char desc[192];
+    char lstr[46], cstr[46];
+    long age = (long)(now - m->first_ts);
+    ids_ip_to_str(listener, lstr, sizeof(lstr));
+    ids_ip_to_str(client, cstr, sizeof(cstr));
+    const char *lvl_name = (m->level == 2) ? "kritik port" :
+                           (m->level == 1) ? "supheli port" : "yuksek port";
+    snprintf(desc, sizeof(desc),
+             "%s:%u uzerinde %s dinleme kanitlari: %u tamamlanan baglanti"
+             " (SYN-ACK), %u SYN girisimi, %s; ilk temas %ld sn once",
+             lstr, (unsigned)m->port, lvl_name,
+             (unsigned)m->connection_count, (unsigned)m->attempt_count,
+             m->data_seen ? "veri akisi goruldu" : "veri akisi yok",
+             age);
+
+    const char *sig = (m->level == 2) ? "Dinleme Servisi (Kritik Port)" :
+                      (m->level == 1) ? "Dinleme Servisi (Supheli Port)" :
+                                      "Yuksek Port Dinleme (Harici Erisim)";
+    int ai = ids_raise_alert_ev(sig, sev, score, pi, desc, ev);
+    if (ai >= 0) {
+        /* Port sahibi saldırgandır: GUI yön göstergesi */
+        platform_mutex_lock(&g_ids_lock);
+        g_alert_buf[ai].port_owner_attacker = 1;
+        platform_mutex_unlock(&g_ids_lock);
+    }
+}
+
 static void ids_check_rules(const IdsPktInfo *pi) {
     char key[96];
     IdsTracker *t;
+    /* [DEĞİŞİKLİK 10] Adaptif eşik çarpanı: ağdaki host sayısı arttıkça
+     * eşikler ölçeklenir (küçük ağlarda normal trafik tarama gibi
+     * görünebileceğinden). */
+    double am = ids_adaptive_multiplier();
 
     /* ---------- 1. ARP Zehirlenmesi (sahte gateway) ---------- */
     if (pi->is_arp && pi->arp_opcode == 2 && g_gateway_mac_valid &&
@@ -1532,57 +2207,13 @@ static void ids_check_rules(const IdsPktInfo *pi) {
         }
     }
 
-    /* ---------- 2. Kötü amaçlı portlara bağlantı ---------- */
-    if (pi->is_tcp) {
-        static const struct MalPortDef { int port; const char *name; } mal_ports[] = {
-            { 4444,  "Meterpreter" },
-            { 31337, "BackOrifice" },
-            { 5555,  "Android ADB" },
-            { 6667,  "IRC (botnet?)" },
-            { 4445,  "Metasploit" },
-            { 1090,  "X-KeyStroke (RAT)" },
-            { 1099,  "Java RMI Registry" },
-            { 1524,  "Metasploit Backdoor (ingreslock)" },
-            { 6666,  "IRC Alt (botnet?)" },
-            { 54320, "BackOrifice 2000" },
-            { 54321, "BackOrifice 2000 (alt)" },
-            { 31338, "BackOrifice (UDP)" },
-        };
-        const char *mal = NULL;
-        for (size_t mi = 0; mi < sizeof(mal_ports) / sizeof(mal_ports[0]); mi++) {
-            if (pi->dst_port == mal_ports[mi].port) {
-                mal = mal_ports[mi].name;
-                break;
-            }
-        }
-        if (mal) {
-            /* Akis bazli tekrar bastirma: ayni kaynak->hedef->port akisi icin
-             * IDS_ALERT_COOLDOWN (60 sn) surece yalnizca TEK uyari uret.
-             * /proc/net fallback modu her 2 sn'de bir ayni SYN baglantisini
-             * yeniden sentezleyip IDS'e besledigi icin bu kural olmasaydi
-             * ayni uyaridan yuzlercesi aninda yigilirdi. */
-            snprintf(key, sizeof(key), "M|%u|%u|%u",
-                     pi->src_ip, pi->dst_ip, pi->dst_port);
-            t = ids_tracker_get(key);
-            if (t) {
-                ids_tracker_bump(t, 0);
-                if (ids_tracker_can_alert(t)) {
-                    char desc[128];
-                    snprintf(desc, sizeof(desc),
-                             "Kotu amacli port %d (%s) baglantisi",
-                             pi->dst_port, mal);
-                    int ai = ids_raise_alert(mal, "KRITIK", SCORE_KRITIK,
-                                             pi, desc);
-                    if (ai >= 0) {
-                        /* Port sahibi saldirgandir: GUI yon gostergesi */
-                        platform_mutex_lock(&g_ids_lock);
-                        g_alert_buf[ai].port_owner_attacker = 1;
-                        platform_mutex_unlock(&g_ids_lock);
-                    }
-                }
-            }
-        }
-    }
+    /* ---------- 2. Dinleme servisi / kötü amaçlı port motoru ----------
+     * [DEĞİŞİKLİK 1] Statik "4444 = Meterpreter" tablosu kaldirildi:
+     * gercek hayatta o portlarda dinleyen legit servisler yanlis pozitif
+     * uretiyordu. Yerine durum bilgili MalPort motoru beslenir: SYN /
+     * SYN-ACK / veri kanitlarini biriktirir ve yalniz connection_count >= 2
+     * veya (syn_seen && data_seen) kapisindan gecenleri uyarir. */
+    if (pi->is_tcp) ids_malport_feed(pi);
 
     /* ---------- 3. TCP tabanlı tarama / saldırılar ---------- */
     if (pi->is_tcp) {
@@ -1597,7 +2228,10 @@ static void ids_check_rules(const IdsPktInfo *pi) {
             t = ids_tracker_get(key);
             if (t) {
                 ids_tracker_bump(t, pi->dst_port);
-                if (t->count >= 20 && t->unique_len >= 8 && ids_tracker_can_alert(t)) {
+                /* [DEĞİŞİKLİK 10] Eşik adaptif: küçük ağlarda (m=1.0) eski
+                 * davranış, büyük ağlarda daha fazla kanıt beklenir. */
+                if (t->count >= (uint32_t)(20 * am) && t->unique_len >= 8 &&
+                    ids_tracker_can_alert(t)) {
                     char desc[128];
                     char s[46];
                     ids_ip_to_str(pi->src_ip, s, sizeof(s));
@@ -1614,57 +2248,111 @@ static void ids_check_rules(const IdsPktInfo *pi) {
             t = ids_tracker_get(key);
             if (t) {
                 ids_tracker_bump(t, pi->src_ip);
-                if (t->count >= 100 && t->unique_len >= 20 && ids_tracker_can_alert(t)) {
+                /* [DEĞİŞİKLİK 7+10] Esik 100 -> 200 + adaptif carpan;
+                 * normal yuksek trafikli sunucular bile 100 SYN toplayabilir. */
+                if (t->count >= (uint32_t)(200 * am) && t->unique_len >= 20 &&
+                    ids_tracker_can_alert(t)) {
                     char desc[128];
                     char d[46];
                     ids_ip_to_str(pi->dst_ip, d, sizeof(d));
                     snprintf(desc, sizeof(desc),
                              "%s:%u hedefine %u farkli kaynaktan SYN flood",
                              d, pi->dst_port, t->unique_len);
-                    ids_raise_alert("SYN Flood (DDoS)", "KRITIK",
-                                    SCORE_KRITIK, pi, desc);
+                    ids_raise_alert_ev("SYN Flood (DDoS)", "KRITIK",
+                                       SCORE_KRITIK, pi, desc,
+                                       IDS_EV_THRESHOLD_MET | IDS_EV_REPEATED);
                 }
             }
 
-            /* Brute force: aynı kaynak→hedef→port arası çok bağlantı */
+            /* Brute force: aynı kaynak→hedef→port arası çok bağlantı.
+             * [DEĞİŞİKLİK 12] Yanlış pozitif düzeltmesi: LAN'dan genel
+             * web portuna (80/443/8080/8443) giden trafik normal tarayıcı
+             * davranışıdır (6-8 paralel TCP bağlantısı) ve ASLA brute
+             * force uyarısı üretmez. Kural yalnızca hedef özel ağdaysa
+             * VEYA hedef port bir kimlik doğrulama/uzak erişim servisi
+             * ise işler. */
             snprintf(key, sizeof(key), "C|%u|%u|%u", pi->src_ip, pi->dst_ip,
                      pi->dst_port);
             t = ids_tracker_get(key);
             if (t) {
-                /* Farkli kaynak portlari say: fallback modunun her 2 sn'de
-                 * ayni SYN baglantisini yeniden sentezlemesi tek bir kaynak
-                 * portu tekrar tekrar sayip yanlis "brute force" uyarisi
-                 * uretiyordu. Gercek brute force her baglanti denemesinde
-                 * yeni bir ephemeral kaynak port kullanir. */
-                ids_tracker_bump(t, pi->src_port);
-                if (t->count >= 8 && t->unique_len >= 5 && ids_tracker_can_alert(t)) {
-                    char desc[192];
-                    char s[46], d[46];
-                    ids_ip_to_str(pi->src_ip, s, sizeof(s));
-                    ids_ip_to_str(pi->dst_ip, d, sizeof(d));
-                    snprintf(desc, sizeof(desc),
-                             "%s -> %s:%u arasi %u farkli kaynak porttan %u baglanti denemesi",
-                             s, d, pi->dst_port, t->unique_len, t->count);
-                    ids_raise_alert(brute_force_name(pi->dst_port),
-                                    brute_force_sev(pi->dst_port),
-                                    SCORE_KRITIK, pi, desc);
+                int dst_priv = ids_ip_is_private(pi->dst_ip);
+                int is_web   = ids_is_web_port(pi->dst_port);
+                int is_auth  = ids_is_auth_port(pi->dst_port);
+                int uni_thr  = is_web ? 12 : (is_auth ? 5 : 8);
+                uint32_t cnt_thr = is_web ? (uint32_t)(20 * am)
+                                   : (is_auth ? (uint32_t)(8 * am)
+                                              : (uint32_t)(12 * am));
+                /* Genel web hedefine (dış ağ) giden trafik: normal tarayıcı
+                 * davranışı, sayaç hiç artırılmaz ve uyarı üretilmez. */
+                if (!(is_web && !dst_priv)) {
+                    /* Farkli kaynak portlari say: fallback modunun her 2 sn'de
+                     * ayni SYN baglantisini yeniden sentezlemesi tek bir kaynak
+                     * portu tekrar tekrar sayip yanlis "brute force" uyarisi
+                     * uretiyordu. Gercek brute force her baglanti denemesinde
+                     * yeni bir ephemeral kaynak port kullanir. */
+                    ids_tracker_bump(t, pi->src_port);
+                    /* [DEĞİŞİKLİK 10] Adaptif çarpan. */
+                    if (t->count >= cnt_thr && t->unique_len >= uni_thr &&
+                        ids_tracker_can_alert(t)) {
+                        char desc[192];
+                        char s[46], d[46];
+                        ids_ip_to_str(pi->src_ip, s, sizeof(s));
+                        ids_ip_to_str(pi->dst_ip, d, sizeof(d));
+                        snprintf(desc, sizeof(desc),
+                                 "%s -> %s:%u arasi %u farkli kaynak porttan %u baglanti denemesi%s",
+                                 s, d, pi->dst_port, t->unique_len, t->count,
+                                 (is_auth && !dst_priv) ? " (dis hedef)" : "");
+                        ids_raise_alert_ev(brute_force_name(pi->dst_port),
+                                           is_web ? "ORTA"
+                                                  : (is_auth ? "KRITIK" : "YUKSEK"),
+                                           is_web ? SCORE_ORTA
+                                                  : (is_auth ? SCORE_KRITIK
+                                                             : SCORE_YUKSEK),
+                                           pi, desc,
+                                           IDS_EV_THRESHOLD_MET |
+                                           IDS_EV_REPEATED |
+                                           (is_auth ? IDS_EV_KNOWN_BAD_PORT : 0) |
+                                           (!ids_ip_in_scope(pi->src_ip)
+                                                ? IDS_EV_EXTERNAL_SRC : 0));
+                    }
                 }
             }
 
-            /* Yatay tarama: ayni porta cok farkli hedefe SYN (tek kaynak) */
+            /* Yatay tarama: ayni porta cok farkli hedefe SYN (tek kaynak).
+             * [DEĞİŞİKLİK 2+10] Hedefler private (RFC1918) / public olarak
+             * ayri ayri sayilir: private hedef taramasi yerel ag kesfidir,
+             * public (internet) hedef taramasi ise daha suphelidir — bu
+             * yuzden public esigi daha dusuktur. Well-known port (<1024)
+             * taramalari (servis kesfi) icin esikler ikiye katlanir.
+             * private_dst_count/public_dst_count, unique[] icinden
+             * hesaplanir (ids_tracker_bump val'i her zaman dst_ip olmadigi
+             * icin oraya eklenemezdi). */
             snprintf(key, sizeof(key), "Y|%u|%u", pi->src_ip, pi->dst_port);
             t = ids_tracker_get(key);
             if (t) {
                 ids_tracker_bump(t, pi->dst_ip);
-                if (t->count >= 8 && t->unique_len >= 6 && ids_tracker_can_alert(t)) {
-                    char desc[128];
+                int priv = 0, pub = 0;
+                for (int u = 0; u < t->unique_len; u++) {
+                    if (ids_ip_is_private(t->unique[u])) priv++;
+                    else pub++;
+                }
+                t->private_dst_count = (uint32_t)priv;
+                t->public_dst_count = (uint32_t)pub;
+                int wk = (pi->dst_port < 1024);
+                uint32_t priv_thr = (uint32_t)((wk ? 30 : 15) * am);
+                uint32_t pub_thr  = (uint32_t)((wk ? 12 : 6) * am);
+                if ((priv >= (int)priv_thr || pub >= (int)pub_thr) &&
+                    ids_tracker_can_alert(t)) {
+                    char desc[192];
                     char s[46];
                     ids_ip_to_str(pi->src_ip, s, sizeof(s));
                     snprintf(desc, sizeof(desc),
-                             "%s -> %u farkli hedefe port %u SYN (yatay tarama)",
-                             s, t->unique_len, pi->dst_port);
-                    ids_raise_alert("Yatay Tarama (Ayni Port)", "YUKSEK",
-                                    SCORE_YUKSEK, pi, desc);
+                             "%s -> %u farkli hedefe port %u SYN (yatay tarama; "
+                             "%d ozel / %d genel hedef)",
+                             s, t->unique_len, pi->dst_port, priv, pub);
+                    ids_raise_alert_ev("Yatay Tarama (Ayni Port)", "YUKSEK",
+                                       SCORE_YUKSEK, pi, desc,
+                                       IDS_EV_THRESHOLD_MET | IDS_EV_MULTI_PORT);
                 }
             }
         }
@@ -1743,29 +2431,43 @@ static void ids_check_rules(const IdsPktInfo *pi) {
             }
         }
 
-        /* DNS anomali: tek kaynaktan aşırı sorgu */
+        /* DNS anomali: tek kaynaktan aşırı sorgu.
+         * [DEĞİŞİKLİK 5] Esik 50 -> 150, sev ORTA -> DUSUK: normal aglarda
+         * sistem/yedekleme trafigi tek kaynaktan yuzlerce sorgu uretebilir. */
         if (pi->is_dns) {
             snprintf(key, sizeof(key), "D|%u", pi->src_ip);
             t = ids_tracker_get(key);
             if (t) {
                 ids_tracker_bump(t, 0);
-                if (t->count >= 50 && ids_tracker_can_alert(t))
-                    ids_raise_alert("DNS Anomali", "ORTA", SCORE_ORTA, pi,
-                                    "Tek kaynaktan asiri DNS sorgusu (tunneling/flood?)");
+                if (t->count >= 150 && ids_tracker_can_alert(t))
+                    ids_raise_alert_ev("DNS Anomali", "DUSUK", SCORE_DUSUK, pi,
+                                       "Tek kaynaktan asiri DNS sorgusu (tunneling/flood?)",
+                                       IDS_EV_REPEATED);
             }
         }
     }
 
-    /* ---------- 5. ICMP flood / ping sweep ---------- */
+    /* ---------- 5. ICMP flood / ping sweep ----------
+     * [DEĞİŞİKLİK 7] Ping sweep sayaci yalniz yerel (RFC1918) hedeflere
+     * beslenir: dis IP'lere tek tek ping (8.8.8.8 izleme/erisim testleri)
+     * tarama sayilmaz. Sweep esigi 10 -> 20; flood ayri sayactadir ve
+     * esigi 100 -> 300 cekildi (monitoring araclari da ICMP uretir). */
     if (pi->is_icmp) {
-        snprintf(key, sizeof(key), "I|%u", pi->src_ip);
+        if (ids_ip_is_private(pi->dst_ip)) {
+            snprintf(key, sizeof(key), "I|%u", pi->src_ip);
+            t = ids_tracker_get(key);
+            if (t) {
+                ids_tracker_bump(t, pi->dst_ip);
+                if (t->unique_len >= 20 && ids_tracker_can_alert(t))
+                    ids_raise_alert("Ping Sweep", "ORTA", SCORE_ORTA, pi,
+                                    "Tek kaynaktan cok sayida farkli yerel hedefe ICMP (ag kesfi)");
+            }
+        }
+        snprintf(key, sizeof(key), "IF|%u", pi->src_ip);
         t = ids_tracker_get(key);
         if (t) {
-            ids_tracker_bump(t, pi->dst_ip);
-            if (t->unique_len >= 10 && ids_tracker_can_alert(t))
-                ids_raise_alert("Ping Sweep", "ORTA", SCORE_ORTA, pi,
-                                "Tek kaynaktan cok sayida farkli hedefe ICMP (ag kesfi)");
-            if (t->count >= 100 && ids_tracker_can_alert(t))
+            ids_tracker_bump(t, 0);
+            if (t->count >= 300 && ids_tracker_can_alert(t))
                 ids_raise_alert("ICMP Flood", "ORTA", SCORE_ORTA, pi,
                                 "Tek kaynaktan asiri ICMP trafigi");
         }
@@ -1776,7 +2478,9 @@ static void ids_check_rules(const IdsPktInfo *pi) {
         t = ids_tracker_get("B");
         if (t) {
             ids_tracker_bump(t, 0);
-            if (t->count >= 150 && ids_tracker_can_alert(t))
+            /* [DEĞİŞİKLİK 7] 150 -> 500: ARP/NetBIOS/mDNS gibi normal
+             * keşif protokolleri surekli broadcast uretir. */
+            if (t->count >= 500 && ids_tracker_can_alert(t))
                 ids_raise_alert("Broadcast Storm", "ORTA", SCORE_ORTA, pi,
                                 "Asiri broadcast/multicast trafigi (ag yavaslamasi)");
         }
@@ -1784,6 +2488,64 @@ static void ids_check_rules(const IdsPktInfo *pi) {
 
     /* ---------- 7. L7 payload imza taramasi ---------- */
     ids_check_payload(pi);
+}
+
+/* ==================================================================
+ *   IZLEME KAPSAMI (scope) — gui.c'deki izleme listesinin motor kopyasi.
+ *   BOS kapsam = hicbir paket islenmez (uyari, host/akis yok). Dolu
+ *   kapsam = yalnizca listedeki IP'lere ait paketler islenir: IPv4 icin
+ *   src/dst, ARP icin sender/target eslesmesi aranir.
+ * ================================================================== */
+#define IDS_SCOPE_IP_STR 16
+static char g_scope_ips[IDS_SCOPE_MAX][IDS_SCOPE_IP_STR];
+static int  g_scope_count = 0;
+
+static int ids_scope_has(uint32_t ip) {
+    char s[IDS_SCOPE_IP_STR];
+    ids_ip_to_str(ip, s, sizeof(s));
+    for (int i = 0; i < g_scope_count; i++)
+        if (strcmp(g_scope_ips[i], s) == 0) return 1;
+    return 0;
+}
+
+static int ids_scope_allows(const IdsPktInfo *pi) {
+    int ok = 0;
+    platform_mutex_lock(&g_ids_lock);
+    if (g_scope_count > 0) {
+        if (ids_scope_has(pi->src_ip) || ids_scope_has(pi->dst_ip)) ok = 1;
+        else if (pi->is_arp &&
+                 (ids_scope_has(pi->arp_sender_ip) ||
+                  ids_scope_has(pi->arp_target_ip))) ok = 1;
+    }
+    platform_mutex_unlock(&g_ids_lock);
+    return ok;
+}
+
+void ids_scope_set(const char *ips[], int n) {
+    platform_mutex_lock(&g_ids_lock);
+    g_scope_count = 0;
+    memset(g_scope_ips, 0, sizeof(g_scope_ips));
+    if (ips && n > 0) {
+        for (int i = 0; i < n && g_scope_count < IDS_SCOPE_MAX; i++) {
+            if (!ips[i] || !ips[i][0]) continue;
+            unsigned a = 0, b = 0, c = 0, d = 0;
+            if (sscanf(ips[i], "%u.%u.%u.%u", &a, &b, &c, &d) == 4 &&
+                a <= 255 && b <= 255 && c <= 255 && d <= 255) {
+                strncpy(g_scope_ips[g_scope_count], ips[i],
+                        IDS_SCOPE_IP_STR - 1);
+                g_scope_ips[g_scope_count][IDS_SCOPE_IP_STR - 1] = '\0';
+                g_scope_count++;
+            }
+        }
+    }
+    platform_mutex_unlock(&g_ids_lock);
+}
+
+void ids_scope_clear(void) {
+    platform_mutex_lock(&g_ids_lock);
+    g_scope_count = 0;
+    memset(g_scope_ips, 0, sizeof(g_scope_ips));
+    platform_mutex_unlock(&g_ids_lock);
 }
 
 /* ==================================================================
@@ -1798,6 +2560,11 @@ void ids_init(void) {
     g_alert_count = 0;
     memset(g_trackers, 0, sizeof(g_trackers));
     g_tracker_count = 0;
+    memset(g_dedup, 0, sizeof(g_dedup));
+    g_dedup_count = 0;
+    memset(g_malport, 0, sizeof(g_malport));
+    g_malport_count = 0;
+    g_ids.suppressed_fps = 0;
     memset(g_bindings, 0, sizeof(g_bindings));
     g_binding_count = 0;
     memset(g_local_mac, 0, sizeof(g_local_mac));
@@ -1823,6 +2590,10 @@ void ids_init(void) {
     g_ids.host_count = 0;
     g_ids.running = 1;
     g_ids.rule_count = 20;
+    /* Izleme kapsami varsayilan: BOS = hicbir sey izlenmez. GUI listesi
+     * bos oldugu surece IDS pasif kalir. */
+    g_scope_count = 0;
+    memset(g_scope_ips, 0, sizeof(g_scope_ips));
     g_ids_initialized = 1;
 }
 
@@ -1869,10 +2640,24 @@ void ids_process_packet(const PacketRecord *pkt) {
     ids_parse_pkt(pkt, &pi);
     if (!pi.is_ipv4 && !pi.is_arp) return;
 
+    /* IZLEME KAPSAMI: bos liste = izleme kapali (hicbir paket islenmez);
+     * dolu liste = yalnizca listedeki IP'lere ait paketler geciyor. */
+    if (!ids_scope_allows(&pi)) return;
+
     /* LAN katmanı: kendi ürettiğimiz trafik dahil TÜM trafiği akış
      * tablosuna işle — Tehdit Haritası ağ geneli görüşe dayanır. */
     ids_flow_update(&pi, pkt);
     ids_flow_analysis();
+
+    int self_pkt = ids_is_self_originated(&pi);
+
+    /* [DEĞİŞİKLİK 14] Self SYN-ACK istisnası: kendi makinemizdeki
+     * dinleyicinin SYN-ACK cevapları self filtresine takılıyordu ve
+     * GERÇEK dinleme kanıtı (synack_seen) hiç toplanamıyordu; uyarı
+     * ancak karşı taraftan veri gelince dakikalar sonra çıkıyordu.
+     * SYN-ACK cevapları self olsa bile dinleme motoruna beslenir. */
+    if (self_pkt && pi.is_tcp && ((pi.tcp_flags & 0x12) == 0x12))
+        ids_malport_feed(&pi);
 
     /* Kendi urettigimiz trafik genel kurallari tetiklemesin: otomatik
      * ARP/ping taramasi (pcap kendi cercevelerini de gorur) ve fallback
@@ -1880,7 +2665,7 @@ void ids_process_packet(const PacketRecord *pkt) {
      * kurallarini tetikleyip Uyarilar sekmesini dolduruyordu. Ancak
      * disariya yaptigimiz port taramalari da tespit edilsin istiyoruz;
      * bu yuzden self trafikte yalnizca ids_check_local_scan() calisir. */
-    if (ids_is_self_originated(&pi)) {
+    if (self_pkt) {
         ids_check_local_scan(&pi);
         return;
     }
