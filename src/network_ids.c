@@ -1,10 +1,8 @@
 /*
- * network_ids.c — Kural Tabanlı Ağ Saldırı Tespit Sistemi (IDS)
- *
- * full_monitor'ın yakaladığı paketlerden ham veriyi (raw_data) parse
- * eder ve eşik tabanlı kurallarla saldırı/şüphe tespiti yapar.
- * Tüm durum sabit boyutlu statik dizilerde tutulur (malloc yok),
- * tek mutex ile thread-safe çalışır.
+ * network_ids.c — Kural Tabanlı Ağ Saldırı Tespit Sistemi (IDS).
+ * full_monitor paketlerini parse eder; eşik tabanlı kurallarla saldırı
+ * tespiti yapar. Durum statik dizilerde (malloc yok) tutulur ve tek
+ * mutex ile thread-safe çalışır.
  */
 
 #include "network_ids.h"
@@ -251,10 +249,9 @@ static uint32_t g_local_ip = 0;
 
 /* ==================================================================
  *   SELF-ORIGINATION SUPPRESSION
- *   Uygulamanin kendi urettigi trafik (otomatik ARP/ping taramasi,
- *   fallback sentetik cerceveler) uyari gurultusu yaratmasin. Yabanci
- *   MAC'ten gelen (kaynak IP yerel olsa bile) cerceveler bastirilmaz:
- *   spoof'lu IP saldirgan olabilir.
+ *   Kendi ürettiğimiz trafik (otomatik ARP/ping taraması, fallback
+ *   sentetik çerçeveler) uyarı gürültüsü yaratmasın; yabancı MAC'ten
+ *   gelen çerçeveler bastırılmaz (spoof'lu IP saldırgan olabilir).
  * ================================================================== */
 
 static int ids_mac_zero(const uint8_t mac[6]) {
@@ -288,23 +285,20 @@ typedef struct {
     uint32_t count;
     uint32_t unique[64];       /* farklı hedef/port hash'leri */
     int      unique_len;
-    /* --- [DEGISIKLIK 17] Port alani icin TAM farkli-deger sayimi ---
-     * unique[64] yalnizca RAPOR icin ilk 64 ornegi tutabilir; 64'ten
-     * fazla farkli port goren bir tarama ekranda hep '64 farkli port'
-     * yaziyordu (doyum). Snort sfPortscan / Suricata da ayni yontemi
-     * kullanir: 65536 bitlik bitmap. Tembel ayrilir, 2-3 porta dokunan
-     * normal akis hic bellek harcamaz. */
+    /* --- Port alanı için tam farklı-değer sayımı ---
+     * unique[64] rapor için ilk 64 örneği tutar; 64'ten fazla farklı port
+     * gören tarama doymasın diye sayım 65536 bitlik bitmap'e geçer (Snort
+     * sfPortscan / Suricata yöntemi). Bitmap tembel ayrılır; 2-3 porta
+     * dokunan normal akış hiç bellek harcamaz. */
     uint8_t *unique_bits;       /* 8192 bayt = 65536 bit (port alani) */
     uint32_t unique_bits_count; /* isaretli bit sayisi = farkli port sayisi */
     int      unique_bits_failed;/* 1 = calloc basarisiz, eski davranisa dus */
-    /* --- [DEĞİŞİKLİK 18] UZUN UFUK (yavaş / hız sınırlamalı tarama) ---
-     * Yukaridaki count/unique_* KISA pencereyi (IDS_WINDOW_SEC, tumbling)
-     * temsil eder ve PATLAMA halindeki taramayi yakalar. Yavas tarama
-     * (or. 2 sn/port) hicbir 10 sn'lik pencereye esik dolduracak kadar
-     * farkli port birakmadigi icin GORUNMEZ kaliyordu; asagidaki ikinci
-     * kume, aktivite boslugu ile kapanan bagimsiz bir UZUN UFUK izler.
-     * long_short_hit: ayni ufuk icinde kisa pencere kurali tetiklendiyse
-     * 1 olur ve uzun ufuk susar (ayni olayi iki kez raporlamamak icin). */
+    /* --- UZUN UFUK (yavaş / hız sınırlamalı tarama) ---
+     * Yukarıdaki count/unique_* KISA pencereyi (IDS_WINDOW_SEC, tumbling)
+     * izler ve patlama halindeki taramayı yakalar. Yavaş tarama hiçbir kısa
+     * pencereye eşiği dolduracak port bırakmadığı için ayrıca, aktivite
+     * boşluğu ile kapanan bir UZUN UFUK izlenir. long_short_hit: kısa
+     * pencere aynı ufukta tetiklendiyse uzun ufuk susar (çift rapor yok). */
     uint32_t long_count;
     uint32_t long_unique[64];
     int      long_unique_len;
@@ -315,7 +309,7 @@ typedef struct {
     time_t   long_start;
     time_t   long_last;
     time_t   long_last_alert;
-    /* --- [DEĞİŞİKLİK 2] Yatay tarama: özel (RFC1918) / genel hedef ayrımı --- */
+    /* ---  Yatay tarama: özel (RFC1918) / genel hedef ayrımı --- */
     uint32_t private_dst_count;
     uint32_t public_dst_count;
     time_t   window_start;
@@ -330,13 +324,12 @@ static uint32_t ids_hash_unique(uint32_t a, uint32_t b) {
     return a ^ (b * 2654435761u);
 }
 
-/* [DEGISIKLIK 17] Port alani (0..65535) bitmap'i: 65536 bit = 8192 bayt. */
+/* Port alani (0..65535) bitmap'i: 65536 bit = 8192 bayt. */
 #define IDS_UNIQUE_BITS_BYTES 8192u
 
-/* ===== [DEĞİŞİKLİK 18] UZUN UFUK AYARLARI ==============================
- * Varsayilanlar header sabitleridir (uretim davranisi). Test/kalibrasyon
- * kancasi bunlari degistirebilir; motor kodu HICBIR yerde sabiti dogrudan
- * kullanmaz, boylece test gercek davranisi olcebilir. */
+/* ===== UZUN UFUK AYARLARI ==============================
+ * Varsayılanlar header sabitleridir; kalibrasyon kancası bunları değiştirir,
+ * motor hiçbir yerde sabiti doğrudan kullanmaz (test gerçek davranışı ölçer). */
 static int g_scan_idle_gap   = IDS_SCAN_IDLE_GAP_SEC;
 static int g_scan_window_max = IDS_SCAN_LONG_WINDOW_SEC;
 static int g_scan_min_span   = IDS_SCAN_MIN_SPAN_SEC;
@@ -364,7 +357,7 @@ void ids_get_scan_window_params(int *idle_gap_sec, int *max_window_sec,
  * donusturulen her tracker bellek sizintisi olurdu). */
 static void ids_tracker_clear(IdsTracker *t) {
     if (t->unique_bits) { free(t->unique_bits); t->unique_bits = NULL; }
-    /* [DEGISIKLIK 18] uzun ufuk bitmap'i de serbest birakilir (yoksa
+    /* uzun ufuk bitmap'i de serbest birakilir (yoksa
      * geri donusturulen her tracker bellek sizintisi olurdu). */
     if (t->long_bits) { free(t->long_bits); t->long_bits = NULL; }
     memset(t, 0, sizeof(*t));
@@ -387,7 +380,7 @@ static IdsTracker *ids_tracker_get(const char *key) {
                 if (g_trackers[i].window_start < victim->window_start)
                     victim = &g_trackers[i];
         }
-        ids_tracker_clear(victim);   /* [DEGISIKLIK 17] bitmap'i de birakir */
+        ids_tracker_clear(victim);   /* bitmap'i de birakir */
         strncpy(victim->key, key, sizeof(victim->key) - 1);
         victim->active = 1;
         victim->window_start = time(NULL);
@@ -401,7 +394,7 @@ static IdsTracker *ids_tracker_get(const char *key) {
     return t;
 }
 
-/* [DEĞİŞİKLİK 14] Yalnızca arama: yoksa kayıt OLUŞTURMAZ (yan etkisiz).
+/* Yalnızca arama: yoksa kayıt OLUŞTURMAZ (yan etkisiz).
  * MalPort motorunun tarama istemcisi tespitinde kullanılır. */
 static IdsTracker *ids_tracker_peek(const char *key) {
     for (int i = 0; i < g_tracker_count; i++) {
@@ -416,14 +409,14 @@ static void ids_tracker_reset_if_expired(IdsTracker *t) {
     if (now - t->window_start > IDS_WINDOW_SEC) {
         t->count = 0;
         t->unique_len = 0;
-        /* [DEGISIKLIK 17] Pencere kapandi: port bitmap'i de sifirlanir,
+        /* Pencere kapandi: port bitmap'i de sifirlanir,
          * yoksa onceki pencerenin portlari yeni pencerede sayili kalir. */
         if (t->unique_bits) {
             memset(t->unique_bits, 0, IDS_UNIQUE_BITS_BYTES);
             t->unique_bits_count = 0;
         }
-        t->private_dst_count = 0;   /* [DEĞİŞİKLİK 2] */
-        t->public_dst_count = 0;    /* [DEĞİŞİKLİK 2] */
+        t->private_dst_count = 0;
+        t->public_dst_count = 0;
         t->window_start = now;
     }
 }
@@ -440,7 +433,7 @@ static void ids_tracker_bump(IdsTracker *t, uint32_t unique_val) {
     }
 }
 
-/* [DEGISIKLIK 17] Ornek dizisinden bitmap'e gecis. Yalnizca 65. farkli
+/* Ornek dizisinden bitmap'e gecis. Yalnizca 65. farkli
  * port goruldugunde cagrilir; mevcut 64 ornek de bitmap'e islenir ki
  * sayac ilk andan itibaren TAM olsun. */
 static int ids_tracker_bits_alloc(IdsTracker *t) {
@@ -490,11 +483,10 @@ static uint32_t ids_tracker_unique(const IdsTracker *t) {
     return t->unique_bits ? t->unique_bits_count : (uint32_t)t->unique_len;
 }
 
-/* ---- [DEĞİŞİKLİK 18] Uzun ufuk (yavaş tarama) yardımcıları ------------
- * Ufuk "aktivite boşluğu" (idle gap) veya azami ömür dolunca kapanır ve
- * sıfırdan başlar: Zeek flow timeout / Snort sfPortscan watchdog mantığı —
- * kapanış paket SAYISINA değil ZAMANA bağlıdır, yoksa 2 sn aralıklı bir
- * tarama hiçbir pencereye sığmaz. */
+/* ---- Uzun ufuk (yavaş tarama) yardımcıları ------------
+ * Ufuk “aktivite boşluğu” (idle gap) veya azami ömür dolunca kapanıp
+ * sıfırdan başlar (Zeek flow timeout / Snort sfPortscan mantığı): kapanış
+ * paket sayısına değil ZAMANA bağlıdır. */
 static void ids_tracker_long_reset(IdsTracker *t, time_t now) {
     t->long_count = 0;
     t->long_unique_len = 0;
@@ -556,8 +548,7 @@ static void ids_tracker_long_bump(IdsTracker *t, uint32_t v) {
     if (v == 0) return;
     /* IP hedefli kurallarda (ping sweep / ARP taramasi / yatay tarama)
      * deger 65536'nin uzerindedir; 65536 bitlik bitmap yalnizca PORT alani
-     * icindir. Bu kurallarin esikleri <= 24 farkli deger istedigi icin 64
-     * ornek yeterlidir (bitmap oraya harcanmaz). */
+     * icindir. Bu kurallarin esikleri <= 24 oldugundan 64 ornek yeterlidir. */
     if (v >= 65536u) {
         if (t->long_unique_len < 64) {
             for (int i = 0; i < t->long_unique_len; i++)
@@ -580,10 +571,10 @@ static uint32_t ids_tracker_long_unique(const IdsTracker *t) {
     return t->long_bits ? t->long_bits_count : (uint32_t)t->long_unique_len;
 }
 
-/* Uzun ufuk tarama kapisi. Uc kosul BIRLIKTE saglanmali:
- *  1) bu ufukta kisa pencere kurali HIC tetiklenmedi (cift rapor yok),
- *  2) uzun ufukta yeterince FARKLI deger goruldu (g_scan_long_thr),
- *  3) gozlem suresi min_span'i gecti, yani tarama gercekten "yavas". */
+/* Uzun ufuk tarama kapisi — uc kosul BIRLIKTE saglanmali:
+ *  1) bu ufukta kisa pencere kurali hic tetiklenmedi (cift rapor yok),
+ *  2) yeterince FARKLI deger goruldu (g_scan_long_thr),
+ *  3) gozlem suresi min_span'i gecti (tarama gercekten “yavas”). */
 static int ids_tracker_long_scan(const IdsTracker *t) {
     if (t->long_short_hit) return 0;
     if (ids_tracker_long_unique(t) < (uint32_t)g_scan_long_thr) return 0;
@@ -618,12 +609,11 @@ static uint32_t ids_sig_flags(const char *sig);
 static void ids_host_credit(uint32_t ip, uint32_t points, uint32_t flag);
 static void ids_host_victim(uint32_t ip, uint32_t points, uint32_t flag);
 
-/* --- [DEĞİŞİKLİK 8] Global uyarı bastırma (dedup) ---
- * Aynı (imza, saldırgan, kurban) üçlüsü IDS_DEDUP_TTL (120 sn) içinde ikinci
- * kez geldiğinde bastırılır ve suppressed_fps sayacı artar. Fallback modunun
- * aynı SYN'i 2 sn'de bir sentezlemesi gibi tekrarlı akışlar uyarı yağmuruna
- * dönüşmesin (FP azaltma). ARP olaylarında src_ip 0 kaldığı için saldırgan/
- * kurban olarak ham çerçevedeki sender/target IP'leri kullanılır. */
+/* --- Global uyarı bastırma (dedup) ---
+ * Aynı (imza, saldırgan, kurban) üçlüsü IDS_DEDUP_TTL (120 sn) içinde
+ * tekrar gelirse bastırılır (tekrarlı akışlar uyarı yağmuruna dönüşmesin).
+ * ARP'de src_ip 0 kaldığı için saldırgan/kurban ham çerçevenin
+ * sender/target IP'lerinden alınır. */
 #define IDS_DEDUP_MAX 64
 #define IDS_DEDUP_TTL 120
 
@@ -670,7 +660,7 @@ static int ids_dedup_check(const char *sig, uint32_t att, uint32_t vic) {
     return 1;
 }
 
-/* --- [DEĞİŞİKLİK 9] Kanıt bitlerinden risk skoru (0-100) --- */
+/* ---  Kanıt bitlerinden risk skoru (0-100) --- */
 static uint8_t ids_calc_confidence(uint8_t ev, const char *sev) {
     uint8_t c = 0;
     if (ev & IDS_EV_THRESHOLD_MET)  c += 30;
@@ -713,13 +703,13 @@ static int ids_raise_alert_ev(const char *sig, const char *sev, double score,
         vic = pi->arp_target_ip;
     }
 
-    /* [DEĞİŞİKLİK 8] Aynı uyarının kısa sürede tekrarı bastırılır */
+    /* Aynı uyarının kısa sürede tekrarı bastırılır */
     if (!ids_dedup_check(sig, att, vic)) {
         platform_mutex_unlock(&g_ids_lock);
         return -1;
     }
 
-    /* [DEĞİŞİKLİK 9] Risk skoru + düşük kanıtta şiddet indirimi */
+    /* Risk skoru + düşük kanıtta şiddet indirimi */
     uint8_t conf = (ev_bits == 0) ? 100 : ids_calc_confidence(ev_bits, sev);
     char fp_reason[64];
     fp_reason[0] = '\0';
@@ -750,10 +740,10 @@ static int ids_raise_alert_ev(const char *sig, const char *sev, double score,
     a->score = score;
     strncpy(a->severity, out_sev, sizeof(a->severity) - 1);
     strncpy(a->description, desc, sizeof(a->description) - 1);
-    a->confidence = conf;                        /* [DEĞİŞİKLİK 9] */
-    a->evidence_bits = ev_bits;                  /* [DEĞİŞİKLİK 9] */
+    a->confidence = conf;
+    a->evidence_bits = ev_bits;
     strncpy(a->fp_reason, fp_reason,
-            sizeof(a->fp_reason) - 1);           /* [DEĞİŞİKLİK 9] */
+            sizeof(a->fp_reason) - 1);
     time_t now = time(NULL);
     struct tm *tm = localtime(&now);
     if (tm) {
@@ -785,16 +775,11 @@ static int ids_raise_alert(const char *sig, const char *sev, double score,
     return ids_raise_alert_ev(sig, sev, score, pi, desc, 0);
 }
 
-/* --- [DEĞİŞİKLİK 14] UYARI BİRLEŞTİRME (alert consolidation) ---
- * Bir kural esigi astiginda uyari yayinlanir; ayni saldiri surdugunde
- * IDS_ALERT_COOLDOWN (60 sn) boyunca yeni uyari uretilmez. Bu sirada olay
- * sayaclari buyumeye devam eder ama ESKI davranista uyari metni ILK
- * tetiklenme anindaki kucuk degerlerde donuyordu: GERCEK testte 30 portluk
- * nmap taramasi "8 paket" olarak raporlandi, 1000 portluk tarama da "16
- * paket" gosteriyordu. Analist yanlis buyuklukte olay goruyordu.
- * Gercek SIEM/IDS'lerde (or. Suricata threshold + aggregation) ayni olay
- * tekrar tekrar uretilmek yerine MEVCUT kayda islenir. Bu yardimci,
- * cooldown icinde gelen daha buyuk kaniti ayni uyari kaydina yazar. */
+/* --- UYARI BİRLEŞTİRME (alert consolidation) ---
+ * Kural eşiği aşınca uyarı yayınlanır; IDS_ALERT_COOLDOWN (60 sn) içinde
+ * aynı olay yeniden yayınlanmaz. Cooldown içinde gelen daha büyük kanıt
+ * MEVCUT kayda işlenir (Suricata threshold+aggregation mantığı); yoksa
+ * metin ilk tetiklenme anındaki küçük değerde donar kalırdı. */
 /* Uyari kaydinin kimligini belirleyen kaynak/hedef IP: ARP'de ham
  * cercevedeki sender/target IP'leri (pi->src_ip/dst_ip ARP'de 0 kalir). */
 static void ids_alert_endpoints(const IdsPktInfo *pi, uint32_t *att,
@@ -845,14 +830,10 @@ static int ids_aggregate_alert(const char *sig, const IdsPktInfo *pi,
             IdsGuiAlert *a = &g_alert_buf[i];
             if (strcmp(a->sig_name, sig) != 0) continue;
             if (strcmp(a->src_ip, satt) != 0) continue;
-            /* pass 0: ayni kaynak + AYNI hedef (eski davranis).
-             * pass 1: ayni kaynak, hedef DEGISTI. Tarama/brute force'da
-             * hedef surekli degistigi icin eski kod (yalnizca pass 0)
-             * hicbir satir bulamiyor ve uyari SESSIZCE kayboluyordu:
-             * dedup anahtari imza+src+dst oldugundan yeni hedefte de
-             * bastirma devredeydi -> ne satir guncelleniyor ne yeni satir
-             * yayinlaniyordu. Gercek pcap tekrar oynatmalarinda
-             * dogrulanmistir. */
+            /* pass 0: ayni kaynak + AYNI hedef; pass 1: ayni kaynak, hedef
+             * DEGISTI. Eski kod yalnizca pass 0'a bakiyordu; tarama/brute
+             * force'da hedef surekli degistigi icin dedup da bastirmaya devam
+             * edip ne satir guncelleniyor ne yeni satir yayinlaniyordu. */
             if (pass == 0 && strcmp(a->dst_ip, svic) != 0) continue;
             strncpy(a->description, desc, sizeof(a->description) - 1);
             a->description[sizeof(a->description) - 1] = '\0';
@@ -891,11 +872,9 @@ static void ids_raise_or_update(const char *sig, const char *sev, double score,
     /* Yayinlanamadi. Once olayin MEVCUT satirini guncellemeyi dene. */
     if (ids_aggregate_alert(sig, pi, desc, ev_bits, conf)) return;
 
-    /* Ne yayin ne guncellenecek satir var: bastirma (dedup) devrede ama
-     * olay kaydi listede yok (liste temizlenmis / kapasite nedeniyle en
-     * eski kayit dusmus). Eski kod bu durumda uyariyi SESSIZCE
-     * KAYBEDIYORDU; olay hala surerken tespit kaydinin bulunmasi gerektigi
-     * icin bastirma serbest birakilir ve olay yeniden yayinlanir. */
+    /* Ne yayin ne guncellenecek satir var: dedup bastiriyor ama kayit
+     * listede yok (liste temizlenmis / en eski kayit dusmus). Olay hala
+     * surerken bastirma serbest birakilir ve olay yeniden yayinlanir. */
     uint32_t att, vic;
     ids_alert_endpoints(pi, &att, &vic);
     ids_dedup_release(sig, att, vic);
@@ -904,11 +883,9 @@ static void ids_raise_or_update(const char *sig, const char *sev, double score,
     ids_aggregate_alert(sig, pi, desc, ev_bits, conf);
 }
 
-/* [DEGISIKLIK 18] Uzun ufuk uyarisi. ids_raise_or_update() ile AYNI uc
- * adimli mantigi kullanir (yayinla -> mevcut satiri guncelle -> bastirmayi
- * serbest birakip yeniden yayinla), ancak AYRI bir soguma alani
- * (long_last_alert) tutar: kisa pencerenin sogumasi uzun ufkun raporunu
- * geciktirmemeli, tersi de olmamali. */
+/* Uzun ufuk uyarisi. ids_raise_or_update()'in uc adimli mantigini kullanir
+ * ama AYRI bir soguma alani (long_last_alert) tutar: kisa pencerenin
+ * sogumasi uzun ufkun raporunu geciktirmemeli, tersi de olmamali. */
 static void ids_raise_or_update_long(const char *sig, const char *sev,
                                      double score, const IdsPktInfo *pi,
                                      const char *desc, uint8_t ev_bits,
@@ -933,12 +910,8 @@ static void ids_raise_or_update_long(const char *sig, const char *sev,
 
 /* ==================================================================
  *   LAN KATMANI — ağ geneli akış tablosu + host tehdit skorlaması
- *
- *   ARP MITM / promiscuous pcap sayesinde tüm ağ trafiği bu makineden
- *   geçtiğinde her cihaz için: hangi IP'lere/portlara dokunduğu, kime
- *   saldırdığı, kimin saldırısına uğradığı ve toplam tehdit skoru
- *   (0-100) hesaplanır. Skorlar uyarı üretimi (ids_raise_alert) ve
- *   akış analizi (ids_flow_analysis) tarafından beslenir.
+ *   Tüm ağ trafiği bu makineden geçtiğinde her cihaz için tehdit skoru
+ *   (0-100) hesaplanır; uyarı üretimi ve akış analizi bu skorları besler.
  * ================================================================== */
 
 /* Uyarı önem derecesi -> host skor katkısı */
@@ -1022,11 +995,11 @@ static IdsHost g_hosts[IDS_MAX_HOSTS];
 static int g_host_count = 0;
 
 /* ---- SOC v3: DGA yanlis pozitif filtreleri ----
- * Normal gezinme trafiği (CDN alt alanlari, PTR, mDNS, yerel adlar)
- * DGA sayilmasin: yalnizca "rastgele gorunumlu" benzersiz
- * kayit-edilebilir alan adlari sayaca girer. */
+ * Normal gezinme trafigi (CDN alt alanlari, PTR, mDNS, yerel adlar)
+ * DGA sayilmasin; yalnizca rastgele gorunumlu benzersiz kayit-edilebilir
+ * alan adlari sayaca girer. */
 
-/* [DEĞİŞİKLİK 5] DGA esikleri: agir yol 60 sorgu + 20 benzersiz SLD;
+/* DGA esikleri: agir yol 60 sorgu + 20 benzersiz SLD;
  * hafif yol 60 sn pencerede >= 5 uzun alfanumerik label. 25/10 gibi dusuk
  * esikler normal gezinme trafiginde yanlis pozitif uretiyordu. */
 #define DGA_MIN_QCOUNT        60
@@ -1183,7 +1156,7 @@ static int ids_ip_in_scope(uint32_t ip) {
     return 0;
 }
 
-/* --- [DEĞİŞİKLİK 2] RFC1918 + loopback + link-local + CGNAT özel adres mi? --- */
+/* ---  RFC1918 + loopback + link-local + CGNAT özel adres mi? --- */
 static int ids_ip_is_private(uint32_t ip) {
     uint8_t a = (uint8_t)(ip >> 24);
     uint8_t b = (uint8_t)(ip >> 16);
@@ -1211,10 +1184,10 @@ static int ids_is_auth_port(uint16_t p) {
     }
 }
 
-/* --- [DEĞİŞİKLİK 12] Port sınıfları (brute force yanlış pozitif düzeltmesi) ---
- * Web portları: tarayıcılar bir siteye 6-8 paralel TCP bağlantısı açar;
- * bu yüzden dış web hedefine giden trafik 'brute force' sayılmamalıdır.
- * Kimlik doğrulama / uzak erişim portları (auth): brute force hedefidir. */
+/* --- Port siniflari (brute force yanlis pozitif duzeltmesi) ---
+ * Web portlari: tarayicilar bir siteye 6-8 paralel TCP baglantisi acar;
+ * dis web hedefine giden trafik 'brute force' sayilmaz. Kimlik dogrulama /
+ * uzak erisim portlari (auth) ise brute force hedefidir. */
 /* Akış bul / yoksa pasif veya en eski slotu geri dönüştür */
 static IdsFlow *ids_flow_get(uint32_t src, uint32_t dst, uint16_t sp,
                               uint16_t dp, uint8_t proto, int *created) {
@@ -1304,9 +1277,8 @@ static void ids_host_victim(uint32_t ip, uint32_t points, uint32_t flag) {
 }
 
 /* ---- SOC v3: host adi ogrenme ----
- * DHCP REQUEST'ta MAC -> bekleyen ad; DHCP ACK'ta MAC + yiaddr eslesir;
- * mDNS A-kaydi ve NBNS sorgulari dogrudan IP -> ad ogretir.
- * Ilk ogrenilen ad kazanir (ad degisimi yanlis pozitif uretmesin). */
+ * DHCP REQUEST (MAC -> bekleyen ad), DHCP ACK (MAC + yiaddr), mDNS A-kaydi
+ * ve NBNS sorgulari IP -> ad ogretir; ilk ogrenilen ad kazanir. */
 typedef struct {
     uint8_t  mac[6];
     char     name[64];
@@ -1426,9 +1398,8 @@ static void ids_flow_update(const IdsPktInfo *pi, const PacketRecord *pkt) {
             ids_hostname_learn(pi->src_ip, pi->nbns_name);
 
         /* DNS sorgusu (kapsamdaki kaynak): DGA sayaci + tunel sezgiseli.
-         * GURULTU FILTRESI (yanlis pozitif onleme): PTR (.arpa), mDNS
-         * (.local) ve yerel adlar hic sayilmaz; ayni sitenin alt alanlari
-         * tek kayit-edilebilir alan adi olarak ele alinir; sayaca
+         * Gurultu filtresi: PTR (.arpa), mDNS (.local) ve yerel adlar hic
+         * sayilmaz; ayni sitenin alt alanlari tek SLD sayilir; sayaca
          * yalnizca rastgele gorunumlu SLD'ler girer. */
         if (pi->dst_port == 53 && !pi->dns_is_response && pi->dns_qdcount > 0 &&
             pi->dns_qname[0] && sh) {
@@ -1444,7 +1415,7 @@ static void ids_flow_update(const IdsPktInfo *pi, const PacketRecord *pkt) {
                 time_t now = time(NULL);
                 ids_registrable_domain(qn, reg, (int)sizeof(reg));
                 sh->dns_qcount++;
-                /* [DEĞİŞİKLİK 5] Guvenilir saglayici (CDN/bulut): DGA/tunel
+                /* Guvenilir saglayici (CDN/bulut): DGA/tunel
                  * sayaci beslenmez; qcount yalnizca istatistik icin artar. */
                 if (!ids_domain_trusted(reg)) {
                     int dup = 0;
@@ -1457,10 +1428,9 @@ static void ids_flow_update(const IdsPktInfo *pi, const PacketRecord *pkt) {
                         sh->dns_dcount++;
                     }
 
-                    /* Tunel + uzun-label sezgiseli: ilk label >=
-                     * DGA_LONG_LABEL_MIN karakter, hem rakam hem harf, tire
-                     * yok. Tunel uyarisi tek seferlik; uzun-label sayaci
-                     * DGA_LONG_LABEL_WIN saniyelik pencerede biriktirilir. */
+                    /* Tunel + uzun-label sezgiseli: ilk label >= MIN karakter,
+                     * hem rakam hem harf, tire yok. Tunel uyarisi tek seferlik;
+                     * uzun-label sayaci DGA_LONG_LABEL_WIN suresi boyunca birikir. */
                     const char *p = qn;
                     int l = 0;
                     while (*p && *p != '.') { l++; p++; }
@@ -1548,12 +1518,10 @@ static void ids_flow_analysis(void) {
             h->victim_score += 20;
             if (h->victim_score > 100) h->victim_score = 100;
         }
-        /* Brute force: aynı port grubunda >= 6 akış ve >= 4 farklı kaynak port.
-         * [DEĞİŞİKLİK 12] Yanlış pozitif düzeltmesi: web portları (80/443/
-         * 8080/8443) için dağıtık koşul normal tarayıcı davranışını (6-8
-         * paralel bağlantı) saldırı sanıyordu. Web portlarında artık TEK
-         * kaynağın akış sayısı belirleyici: bir kaynak >= 15 akış getirirse
-         * bu bir fırtına (saldırı) kabul edilir. */
+        /* Brute force: ayni port grubunda >= 6 akis ve >= 4 farkli kaynak port.
+         * Web portlarinda (80/443/8080/8443) bu kosul normal tarayici
+         * davranisini (6-8 paralel baglanti) saldiri saniyordu; orada TEK
+         * kaynagin >= 15 akisi firtina (saldiri) kabul edilir. */
         if (h->flows_as_dst >= 6 && !(h->flags & IDS_F_BRUTEFORCE)) {
             typedef struct {
                 uint16_t port;
@@ -1621,7 +1589,7 @@ static void ids_flow_analysis(void) {
         }
 
         /* ---- SOC v3: DNS DGA / tunel analizi (saniyede bir) ---- */
-        /* [DEĞİŞİKLİK 5] Iki bagimsiz kanit yolu:
+        /* Iki bagimsiz kanit yolu:
          * 1) agir esik: DGA_MIN_QCOUNT sorgu + DGA_MIN_DCOUNT benzersiz SLD
          * 2) hafif esik: DGA_LONG_LABEL_WIN sn pencerede >= DGA_LONG_LABEL_MAX
          *    uzun alfanumerik label (guven dusuk -> sev YUKSEK) */
@@ -1815,7 +1783,7 @@ void ids_clear_host_data(void) {
  *   KURAL EŞİKLERİ
  * ================================================================== */
 
-/* --- [DEĞİŞİKLİK 2] Yaygın/well-known port mu? (yatay tarama eşik seçimi) --- */
+/* ---  Yaygın/well-known port mu? (yatay tarama eşik seçimi) --- */
 static int ids_port_is_wellknown(uint16_t p) {
     switch (p) {
         case 20: case 21: case 22: case 23: case 25: case 53: case 80:
@@ -1828,7 +1796,7 @@ static int ids_port_is_wellknown(uint16_t p) {
     }
 }
 
-/* --- [DEĞİŞİKLİK 1+EK] "Ortak servis" portları: bilinmeyen yüksek port
+/* ---  "Ortak servis" portları: bilinmeyen yüksek port
  * dinleme tespitinde (level 0) bunlar şüphe sayılmaz (FP önleme) --- */
 static int ids_port_is_common_service(uint16_t p) {
     switch (p) {
@@ -1845,7 +1813,7 @@ static int ids_port_is_common_service(uint16_t p) {
     }
 }
 
-/* --- [DEĞİŞİKLİK 4] Binary protokol portları: shellcode eşiği burada yükselir --- */
+/* ---  Binary protokol portları: shellcode eşiği burada yükselir --- */
 static int ids_port_is_binary_proto(uint16_t p) {
     switch (p) {
         case 445: case 139: case 137: case 138:   /* SMB/NetBIOS */
@@ -1858,7 +1826,7 @@ static int ids_port_is_binary_proto(uint16_t p) {
     }
 }
 
-/* --- [DEĞİŞİKLİK 6] TLS portları: şifreli içerikte payload imzası aranmaz --- */
+/* ---  TLS portları: şifreli içerikte payload imzası aranmaz --- */
 static int ids_port_is_tls(uint16_t p) {
     switch (p) {
         case 443: case 8443: case 465: case 993: case 995: case 587:
@@ -1868,7 +1836,7 @@ static int ids_port_is_tls(uint16_t p) {
     }
 }
 
-/* --- [DEĞİŞİKLİK 10] Ağ büyüklüğüne göre adaptif eşik çarpanı:
+/* ---  Ağ büyüklüğüne göre adaptif eşik çarpanı:
  * host sayısı arttıkça eşikler büyür (küçük ağlarda normal trafik
  * bile tarama gibi görünebildiği için burada ölçeklenir). --- */
 static double ids_adaptive_multiplier(void) {
@@ -1892,7 +1860,7 @@ static const char *brute_force_name(uint16_t dport) {
         case 80:
         case 443:
         case 8080:
-        case 8443: return "Web Brute Force";   /* [DEĞİŞİKLİK 12] */
+        case 8443: return "Web Brute Force";
         default:   return "Brute Force";
     }
 }
@@ -2061,11 +2029,9 @@ static const IdsSig g_sigs[] = {
     { "whoami",        "Komut Calistirma (whoami)",    "YUKSEK", SCORE_YUKSEK, 1 },
     { "<?php",         "PHP Kodu Enjeksiyonu",         "YUKSEK", SCORE_YUKSEK, 1 },
     { "eval(",         "Kod Enjeksiyonu (eval)",       "YUKSEK", SCORE_YUKSEK, 1 },
-    /* Powershell / yuk indirme — [DEĞİŞİKLİK 7] yalniz istek yonu ve
-     * dusuk guven: bu sozcukler servis yanitlarinda, paket yoneticisi
-     * (apt/wget), CI/CD ve betik trafiginde yaygin gecer; base64 imzasi
-     * kaldirildi (JWT/veri-URI/ssh anahtari gibi zararsiz icerikte
-     * surekli gecen en gurultulu sozcuklerden biriydi). */
+    /* Powershell / yuk indirme: yalniz istek yonu ve dusuk guven. Bu
+     * sozcukler servis yanitlarinda, apt/wget, CI/CD ve betik trafiginde
+     * yaygin gecer; base64 imzasi kaldirildi (en gurultulu FP kaynagi). */
     { "powershell",    "PowerShell Komutu",            "ORTA",   SCORE_ORTA,   1 },
     { "-enc",          "PowerShell EncodedCommand",    "YUKSEK", SCORE_YUKSEK, 1 },
     { "IEX(",          "PowerShell IEX",               "KRITIK", SCORE_KRITIK, 1 },
@@ -2106,7 +2072,7 @@ static int ids_mem_has_run(const uint8_t *p, int n, uint8_t byte, int min_run) {
     return 0;
 }
 
-/* --- [DEĞİŞİKLİK 4] Yüksek entropili (şifreli/komprese) payload mı?
+/* ---  Yüksek entropili (şifreli/komprese) payload mı?
  * TLS/şifreli tüneller ve arşiv akışları NOP/INT3 gibi yapısal imzaları
  * rastgele üretebildiği için burada kontrol atlanır (FP önleme). --- */
 static int ids_payload_likely_encrypted(const uint8_t *p, int n) {
@@ -2155,7 +2121,7 @@ static void ids_check_payload(const IdsPktInfo *pi) {
     IdsTracker *tr;
 
     if (!p || n <= 0) return;
-    /* [DEĞİŞİKLİK 8] TLS portlari: icerik sifreli oldugu icin imza
+    /* TLS portlari: icerik sifreli oldugu icin imza
      * aramasi yalnizca yanlis pozitif uretir (sifreli baytlar desen
      * taklit edebilir). */
     if (ids_port_is_tls(pi->src_port) || ids_port_is_tls(pi->dst_port)) return;
@@ -2166,7 +2132,7 @@ static void ids_check_payload(const IdsPktInfo *pi) {
      * request_only olmayan imzalar aranir. */
     is_request = (pi->src_port >= 1024);
 
-    /* [DEĞİŞİKLİK 8] Yuksek entropili (sifreli/komprese) akis: L7 imzasi
+    /* Yuksek entropili (sifreli/komprese) akis: L7 imzasi
      * ve sled aramasi anlamsizdir; rastgele baytlar yanlis eslesme yapar. */
     if (ids_payload_likely_encrypted(p, n)) return;
 
@@ -2188,7 +2154,7 @@ static void ids_check_payload(const IdsPktInfo *pi) {
     }
 
     /* Shellcode sled'leri: NOP (0x90) / INT3 (0xCC) serileri.
-     * [DEĞİŞİKLİK 8] Esik normalde 16; binary protokol portlarinda 32
+     *  Esik normalde 16; binary protokol portlarinda 32
      * (SMB/DB akislarinda 0x90/0xCC rastgele dolgu olarak gorulebilir). */
     int sl_edge = (ids_port_is_binary_proto(pi->src_port) ||
                    ids_port_is_binary_proto(pi->dst_port)) ? 32 : 16;
@@ -2223,27 +2189,14 @@ static void ids_check_payload(const IdsPktInfo *pi) {
 }
 
 /* ==================================================================
- *   [DEĞİŞİKLİK 1+EK] AKILLI MAL-PORT / DİNLEME SERVİSİ MOTORU
- *
- *   "4444 = Meterpreter" tarzı sabit kalıp mantığı terk edildi: port
- *   listeleri yalnızca hızlandırıcı/öncelik vericidir; asıl motor
- *   "bir makinede dışarıya dinleme yapılıyor mu" sorusuna odaklanır.
- *
- *   Katmanlar:
- *     level 2 = bilinen kötü amaçlı port (critical): HER yönde, iç-iç
- *               dahil — KRITIK
- *     level 1 = şüpheli yüksek port (suspicious): iç-iç (local-local)
- *               hariç — YUKSEK
- *     level 0 = bilinmeyen YÜKSEK portta dinleme: yalnızca yerel
- *               dinleyici + dış istemci — ORTA (genelleştirilmiş
- *               "port dinleme" tespiti, kullanıcı talebi)
- *
- *   Uyarı kapısı (EK gereksinim): yalnızca
- *     connection_count >= 2  VEYA  (syn_seen && data_seen)
- *   ise uyarı üretilir; açıklama mesajı birikmiş kanıtları listeler.
- *   connection_count yalnızca SYN-ACK ile artar; SYN girişimleri
- *   attempt_count olarak ayrıca izlenir. Yerel servis istisnası:
- *   dinleyicinin akış sayısı (flows_as_dst) >= 3 ise KRITIK -> YUKSEK.
+ *   AKILLI MAL-PORT / DİNLEME SERVİSİ MOTORU
+ *   Sabit “4444 = Meterpreter” kalıbı yalnız hızlandırıcıdır; asıl soru
+ *   “bir makinede dışarıya dinleme var mı”.
+ *   level2 = bilinen kötü amaçlı port, HER yön (iç-iç dahil) — KRITIK
+ *   level1 = şüpheli yüksek port, iç-iç hariç — YUKSEK
+ *   level0 = bilinmeyen yüksek port, yerel dinleyici + dış istemci — ORTA
+ *   Kapı: connection_count >= 2 VEYA (syn_seen && data_seen); count
+ *   yalnız SYN-ACK ile artar; flows_as_dst >= 3 ise KRITIK -> YUKSEK.
  * ================================================================== */
 
 #define IDS_MP_MAX        64
@@ -2270,14 +2223,14 @@ typedef struct {
 static IdsMalPortState g_malport[IDS_MP_MAX];
 static int g_malport_count = 0;
 
-/* [DEĞİŞİKLİK 1] Bilinen kötü amaçlı/C2/RAT portları (level 2 — hızlandırıcı) */
+/* Bilinen kötü amaçlı/C2/RAT portları (level 2 — hızlandırıcı) */
 static const uint16_t k_mal_ports_critical[] = {
     4444, 4445, 31337, 31338, 54320, 54321, 5555,
-    6666, 6667, 1090, 1099, 1524, 12345, 27374, 22222
+    6666, 6667, 1090, 1099, 1524, 1234, 12345, 27374, 22222
 };
 #define K_MAL_CRIT_N (int)(sizeof(k_mal_ports_critical) / sizeof(k_mal_ports_critical[0]))
 
-/* [DEĞİŞİKLİK 1] Normal ağda nadir görülen yönetim/RAT benzeri yüksek
+/* Normal ağda nadir görülen yönetim/RAT benzeri yüksek
  * portlar (level 1 — iç-iç kullanım uyarı üretmez) */
 static const uint16_t k_mal_ports_suspicious[] = {
     4443, 7001, 8001, 8081, 9001, 10001, 20000, 4446, 4555
@@ -2350,11 +2303,10 @@ static int ids_flow_count_as_dst(uint32_t ip) {
 static void ids_malport_feed(const IdsPktInfo *pi) {
     if (!pi->is_tcp || !pi->dst_port) return;
 
-    /* [DEĞİŞİKLİK 1+EK] Zaman asimi: IDS_MP_TIMEOUT (300 sn) sure pasif
-     * kalan kayitlar dusulur — suphe zamanla gecerliligini yitirir, aksi
-     * halde eski kayitlar kabi doldurup gercek kayitlari geri donusturur.
-     * (ids_flow_analysis bu tanimdan once geldigi icin temizlik burada
-     * yapilir; maliyet kayit basina bir karsilastirmadir.) */
+    /* Zaman asimi: IDS_MP_TIMEOUT (300 sn) sure pasif kalan kayitlar
+     * dusulur — suphe zamanla gecerliligini yitirir; yoksa eski kayitlar
+     * kabi doldurup gercek kayitlari geri donusturur (kayit basina bir
+     * karsilastirma maliyeti). */
     time_t now0 = time(NULL);
     for (int i = 0; i < g_malport_count; i++) {
         if (g_malport[i].active &&
@@ -2386,11 +2338,9 @@ static void ids_malport_feed(const IdsPktInfo *pi) {
     }
     if (!listener || !client) return;
 
-    /* [DEĞİŞİKLİK 14] Tarama istemcisi ayrımı: aynı kaynak 10 sn
-     * penceresinde 8+ farklı hedef porta SYN attıysa bu bir port
-     * taramasıdır; tarama SYN'leri dinleme kanıtı olarak kayda
-     * geçirilmez (taramanın kendisi S| kuralından alarm üretir).
-     * nmap'in açık porta bağlanması "Dinleme Servisi" alarmı DEĞİL. */
+    /* Tarama istemcisi ayrimi: ayni kaynak kisa pencerede 8+ farkli hedef
+     * porta SYN attiysa bu port taramasidir; tarama SYN'leri dinleme kaniti
+     * olarak kayda gecirilmez (taramayi S| kurali zaten alarmlar). */
     if (is_syn) {
         char sk[32];
         snprintf(sk, sizeof(sk), "S|%u", pi->src_ip);
@@ -2403,19 +2353,16 @@ static void ids_malport_feed(const IdsPktInfo *pi) {
 
     IdsMalPortState *m = ids_malport_find(listener, client, port);
 
-    /* [DEĞİŞİKLİK 14] Yetim SYN-ACK: eşleşen SYN kanıtı olmayan SYN-ACK
-     * dinleme kanıtı değildir. Self kaynaklı tarama SYN'leri (kendi
-     * makinemizden nmap vb.) self filtresiyle bastırıldığında, hedefin
-     * SYN-ACK cevapları buraya yetim olarak ulaşıyor ve kayıt açıp
-     * connection_count sayarak YANLIŞ "Dinleme Servisi (Kritik Port)"
-     * alarmı üretiyordu (ekranda: "2 tamamlanan baglanti, 0 SYN"). */
+    /* Yetim SYN-ACK: eslesen SYN kaniti olmayan SYN-ACK dinleme kaniti
+     * degildir. Self tarama SYN'leri bastirildiginda hedefin SYN-ACK
+     * cevaplari yetim kalip YANLIS “Dinleme Servisi” alarmi uretiyordu. */
     if (is_synack && !m) return;
 
-    /* Kayıt yoksa oluşturma koşulları:
-     * - level 2 (critical): her yön, iç-iç dahil
-     * - level 1 (suspicious): her yön (uyarı aşamasında iç-iç elenir)
-     * - level 0: yalnızca SYN yönünde; yerel dinleyici + dış istemci +
-     *   yüksek port + ortak servis değil */
+    /* Kayit yoksa olusturma kosullari:
+     * - level 2 (critical): her yon, ic-ic dahil
+     * - level 1 (suspicious): her yon (uyarida ic-ic elenir)
+     * - level 0: yalniz SYN yonunde; yerel dinleyici + dis istemci +
+     *   yuksek port + ortak servis degil */
     if (!m) {
         int lvl = ids_malport_level(port);
         if (lvl == 0) {
@@ -2433,7 +2380,7 @@ static void ids_malport_feed(const IdsPktInfo *pi) {
         m->syn_seen = 1;
         m->attempt_count++;
     } else if (is_synack) {
-        if (!m->syn_seen) return;  /* [DEĞİŞİKLİK 14] SYN'siz cevap sayılmaz */
+        if (!m->syn_seen) return;  /* SYN'siz cevap sayılmaz */
         m->synack_seen = 1;
         m->connection_count++;
     } else {
@@ -2441,12 +2388,10 @@ static void ids_malport_feed(const IdsPktInfo *pi) {
     }
     m->last_seen = time(NULL);
 
-    /* EK gereksinim kapısı: [DEĞİŞİKLİK 14] gerçek istemci teması
-     * (SYN geldi + dinleyici SYN-ACK ile cevapladı) ilk bağlantıda
-     * uyarı üretir; eskiden 2. bağlantı veya veri bekleniyordu ve
-     * gerçek dinleme dakikalar sonra ancak uyarı verebiliyordu.
-     * Fallback modunda yalnız SYN görülür (SYN-ACK yok) — o zaman
-     * bilinçli olarak uyarı verilmez. */
+    /* Kapi: gercek istemci temasi (SYN geldi + dinleyici SYN-ACK ile
+     * cevapladi) ilk baglantida uyari uretir; eskiden 2. baglanti veya veri
+     * bekleniyordu. Fallback modunda yalniz SYN gorulur (SYN-ACK yok),
+     * o zaman bilincli olarak uyari verilmez. */
     int gate = (m->connection_count >= 2) ||
                (m->syn_seen && m->data_seen) ||
                (m->syn_seen && m->synack_seen);
@@ -2510,7 +2455,7 @@ static void ids_malport_feed(const IdsPktInfo *pi) {
 static void ids_check_rules(const IdsPktInfo *pi) {
     char key[96];
     IdsTracker *t;
-    /* [DEĞİŞİKLİK 10] Adaptif eşik çarpanı: ağdaki host sayısı arttıkça
+    /* Adaptif eşik çarpanı: ağdaki host sayısı arttıkça
      * eşikler ölçeklenir (küçük ağlarda normal trafik tarama gibi
      * görünebileceğinden). */
     double am = ids_adaptive_multiplier();
@@ -2577,7 +2522,7 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                 ids_raise_or_update("ARP Taramasi (Ag Kesfi)", "ORTA",
                                     SCORE_ORTA, pi, desc, 0, t);
             }
-            /* [DEĞİŞİKLİK 18] Yavas ARP sweep: 10 sn'de 8 farkli hedef
+            /* Yavas ARP sweep: 10 sn'de 8 farkli hedef
              * esigini hicbir pencere karşılamasa bile 24+ farkli hedefe
              * yayilan ARP istekleri ag kesfi sayilir. */
             if (ids_tracker_long_scan(t)) {
@@ -2598,12 +2543,11 @@ static void ids_check_rules(const IdsPktInfo *pi) {
         }
     }
 
-    /* ---------- 2. Dinleme servisi / kötü amaçlı port motoru ----------
-     * [DEĞİŞİKLİK 1] Statik "4444 = Meterpreter" tablosu kaldirildi:
-     * gercek hayatta o portlarda dinleyen legit servisler yanlis pozitif
-     * uretiyordu. Yerine durum bilgili MalPort motoru beslenir: SYN /
-     * SYN-ACK / veri kanitlarini biriktirir ve yalniz connection_count >= 2
-     * veya (syn_seen && data_seen) kapisindan gecenleri uyarir. */
+    /* ---------- 2. Dinleme servisi / kotu amacli port motoru ----------
+     * Statik kotu amacli port tablosu kaldirildi (legit servisler FP
+     * uretiyordu); yerine durum bilgili motor SYN/SYN-ACK/veri kaniti
+     * biriktirir ve ancak connection_count >= 2 veya (syn_seen && data_seen)
+     * kapisindan gecenleri uyarir. */
     if (pi->is_tcp) ids_malport_feed(pi);
 
     /* ---------- 3. TCP tabanlı tarama / saldırılar ---------- */
@@ -2619,28 +2563,14 @@ static void ids_check_rules(const IdsPktInfo *pi) {
             t = ids_tracker_get(key);
             if (t) {
                 ids_tracker_bump_port(t, pi->dst_port);
-                ids_tracker_long_bump(t, pi->dst_port);   /* [18] uzun ufuk */
-                /* [DEĞİŞİKLİK 10 + 14] Esik adaptif: kucuk aglarda (am=1.0)
-                 * eski davranis, buyuk aglarda daha fazla kanit beklenir.
-                 *
-                 * PASIF KURAL — BILINCLI OLARAK MUHAFAZAKAR: bu kural
-                 * LAN'daki DIGER hostlarin disariya SYN davranisini
-                 * yakalar. Kendi makinemizin taramalari bu kapiya hic
-                 * girmez; onlari ids_check_local_scan() (L| kurali)
-                 * yakalar. Ayirt edici sinyal "kac FARKLI porta" oldugu
-                 * dogru, ancak tek basina 8 farkli porta 10 sn icinde SYN
-                 * gonderen mesru uygulamalar da vardir (cok baglantili
-                 * istemciler, yuk guncelleme paralelligi); yalnizca
-                 * unique_len esigi ile uyarilamak yanlis pozitifi —
-                 * kullanicinin birincil sikayetini — dogrudan artirir ve
-                 * canli trafikte dogrulanmamis bir degisiklik olurdu.
-                 * Bu yuzden hem paket sayisi hem farkli port sayisi
-                 * yuksek olmali (kanitli, eski esik korunur).
-                 * BILINEN SINIRLAMA: 10 sn'lik pencerede 8-19 farkli porta
-                 * dokunan kisa dis taramalar bu kurala takilmaz; boyle bir
-                 * trafik ancak L| kapsamina girerse (yerel kaynak) veya
-                 * akis analizinin tarama/sweep skoru ile (ozet skor, uyari
-                 * listesi degil) gorunur. */
+                ids_tracker_long_bump(t, pi->dst_port);
+                /* Esik adaptif: kucuk aglarda (am=1.0) eski davranis, buyuk
+                 * aglarda daha fazla kanit beklenir. PASIF KURAL: LAN'daki
+                 * DIGER hostlarin disariya SYN davranisini yakalar; kendi
+                 * makinemizin taramalari L| kuralina girer. Hem paket sayisi
+                 * hem farkli port sayisi yuksek olmali — tek basina 8 farkli
+                 * porta SYN atan mesru uygulamalar (cok baglantili istemciler,
+                 * paralel guncelleme) FP uretmesin. */
                 if (t->count >= (uint32_t)(20 * am) &&
                     ids_tracker_unique(t) >= 8) {
                     t->long_short_hit = 1;   /* [18] kisa pencere yakaladi */
@@ -2653,7 +2583,7 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                     ids_raise_or_update("Port Taramasi (SYN)", "YUKSEK",
                                         SCORE_YUKSEK, pi, desc, 0, t);
                 }
-                /* [DEĞİŞİKLİK 18] Yavas SYN taramasi: kisa pencere 10 sn'de
+                /* Yavas SYN taramasi: kisa pencere 10 sn'de
                  * 20 paket + 8 farkli port ister; 2 sn aralikli tarama bu
                  * esigi HIC gormez ve eskiden tamamen gorunmezdi. */
                 if (ids_tracker_long_scan(t)) {
@@ -2676,7 +2606,7 @@ static void ids_check_rules(const IdsPktInfo *pi) {
             t = ids_tracker_get(key);
             if (t) {
                 ids_tracker_bump(t, pi->src_ip);
-                /* [DEĞİŞİKLİK 7+10] Esik 100 -> 200 + adaptif carpan;
+                /* Esik 100 -> 200 + adaptif carpan;
                  * normal yuksek trafikli sunucular bile 100 SYN toplayabilir. */
                 if (t->count >= (uint32_t)(200 * am) && t->unique_len >= 20) {
                     char desc[128];
@@ -2692,13 +2622,11 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                 }
             }
 
-            /* Brute force: aynı kaynak→hedef→port arası çok bağlantı.
-             * [DEĞİŞİKLİK 12] Yanlış pozitif düzeltmesi: LAN'dan genel
-             * web portuna (80/443/8080/8443) giden trafik normal tarayıcı
-             * davranışıdır (6-8 paralel TCP bağlantısı) ve ASLA brute
-             * force uyarısı üretmez. Kural yalnızca hedef özel ağdaysa
-             * VEYA hedef port bir kimlik doğrulama/uzak erişim servisi
-             * ise işler. */
+            /* Brute force: ayni kaynak -> hedef -> port arasi cok baglanti.
+             * Web portlarina (80/443/8080/8443) giden LAN trafigi normal
+             * tarayici davranisidir ve ASLA brute force sayilmaz; kural
+             * yalniz ozel ag hedefinde VEYA kimlik dogrulama / uzak erisim
+             * portunda isler. */
             snprintf(key, sizeof(key), "C|%u|%u|%u", pi->src_ip, pi->dst_ip,
                      pi->dst_port);
             t = ids_tracker_get(key);
@@ -2713,13 +2641,12 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                 /* Genel web hedefine (dış ağ) giden trafik: normal tarayıcı
                  * davranışı, sayaç hiç artırılmaz ve uyarı üretilmez. */
                 if (!(is_web && !dst_priv)) {
-                    /* Farkli kaynak portlari say: fallback modunun her 2 sn'de
-                     * ayni SYN baglantisini yeniden sentezlemesi tek bir kaynak
-                     * portu tekrar tekrar sayip yanlis "brute force" uyarisi
-                     * uretiyordu. Gercek brute force her baglanti denemesinde
-                     * yeni bir ephemeral kaynak port kullanir. */
+                    /* Farkli kaynak portlari say: fallback her 2 sn'de ayni
+                     * SYN'i yeniden sentezleyip tek kaynak portunu tekrar tekrar
+                     * sayarak yanlis brute force uretiyordu; gercek brute force
+                     * her denemede yeni ephemeral kaynak portu kullanir. */
                     ids_tracker_bump_port(t, pi->src_port);
-                    /* [DEĞİŞİKLİK 10] Adaptif çarpan. */
+                    /* Adaptif çarpan. */
                     if (t->count >= cnt_thr &&
                         (int)ids_tracker_unique(t) >= uni_thr) {
                         char desc[192];
@@ -2750,14 +2677,10 @@ static void ids_check_rules(const IdsPktInfo *pi) {
             }
 
             /* Yatay tarama: ayni porta cok farkli hedefe SYN (tek kaynak).
-             * [DEĞİŞİKLİK 2+10] Hedefler private (RFC1918) / public olarak
-             * ayri ayri sayilir: private hedef taramasi yerel ag kesfidir,
-             * public (internet) hedef taramasi ise daha suphelidir — bu
-             * yuzden public esigi daha dusuktur. Well-known port (<1024)
-             * taramalari (servis kesfi) icin esikler ikiye katlanir.
-             * private_dst_count/public_dst_count, unique[] icinden
-             * hesaplanir (ids_tracker_bump val'i her zaman dst_ip olmadigi
-             * icin oraya eklenemezdi). */
+             * Private (RFC1918) / public hedefler ayri sayilir; public tarama
+             * daha supheli oldugu icin esigi dusuktur; well-known port (<1024)
+             * taramalarinda esikler ikiye katlanir. Sayimlar unique[] icinden
+             * yapilir (val her zaman dst_ip degildir). */
             snprintf(key, sizeof(key), "Y|%u|%u", pi->src_ip, pi->dst_port);
             t = ids_tracker_get(key);
             if (t) {
@@ -2788,7 +2711,7 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                                         IDS_EV_THRESHOLD_MET |
                                         IDS_EV_MULTI_PORT, t);
                 }
-                /* [DEĞİŞİKLİK 18] Yavas yatay tarama (tek port, cok hedef):
+                /* Yavas yatay tarama (tek port, cok hedef):
                  * hedefler arasinda sn'lerce beklendiginde kisa pencere
                  * esigi (ozel 15 / genel 6) hic dolmuyordu. */
                 if (ids_tracker_long_scan(t)) {
@@ -2828,7 +2751,7 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                     ids_raise_or_update("Port Taramasi (FIN)", "YUKSEK",
                                         SCORE_YUKSEK, pi, desc, 0, t);
                 }
-                /* [DEĞİŞİKLİK 18] Yavas FIN-only ("stealth") taramasi:
+                /* Yavas FIN-only ("stealth") taramasi:
                  * nmap -sF -T1 gibi hiz sinirlamali taramalar 10 sn'de
                  * 15 FIN paketi birakmaz; uzun ufuk bunlari yakalar. */
                 if (ids_tracker_long_scan(t)) {
@@ -2862,7 +2785,7 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                     ids_raise_or_update("Port Taramasi (NULL)", "YUKSEK",
                                         SCORE_YUKSEK, pi, desc, 0, t);
                 }
-                /* [DEĞİŞİKLİK 18] Yavas flagsiz (NULL) tarama. */
+                /* Yavas flagsiz (NULL) tarama. */
                 if (ids_tracker_long_scan(t)) {
                     char ldesc[160];
                     char ls[46];
@@ -2894,7 +2817,7 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                     ids_raise_or_update("Port Taramasi (Xmas)", "YUKSEK",
                                         SCORE_YUKSEK, pi, desc, 0, t);
                 }
-                /* [DEĞİŞİKLİK 18] Yavas Xmas tarama. */
+                /* Yavas Xmas tarama. */
                 if (ids_tracker_long_scan(t)) {
                     char ldesc[160];
                     char ls[46];
@@ -2957,7 +2880,7 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                     ids_tracker_can_alert(t))
                     ids_raise_alert("UDP Flood", "ORTA", SCORE_ORTA, pi,
                                     "Tek kaynaktan asiri UDP trafigi");
-                /* [DEĞİŞİKLİK 18] Yavas UDP taramasi (nmap -sU -T1 gibi):
+                /* Yavas UDP taramasi (nmap -sU -T1 gibi):
                  * 10 sn'de 15 paket/8 port esigi dolmaz, tarama gorunmezdi. */
                 if (ids_tracker_long_scan(t)) {
                     char ldesc[160];
@@ -2975,7 +2898,7 @@ static void ids_check_rules(const IdsPktInfo *pi) {
         }
 
         /* DNS anomali: tek kaynaktan aşırı sorgu.
-         * [DEĞİŞİKLİK 5] Esik 50 -> 150, sev ORTA -> DUSUK: normal aglarda
+         *  Esik 50 -> 150, sev ORTA -> DUSUK: normal aglarda
          * sistem/yedekleme trafigi tek kaynaktan yuzlerce sorgu uretebilir. */
         if (pi->is_dns) {
             snprintf(key, sizeof(key), "D|%u", pi->src_ip);
@@ -2991,10 +2914,9 @@ static void ids_check_rules(const IdsPktInfo *pi) {
     }
 
     /* ---------- 5. ICMP flood / ping sweep ----------
-     * [DEĞİŞİKLİK 7] Ping sweep sayaci yalniz yerel (RFC1918) hedeflere
-     * beslenir: dis IP'lere tek tek ping (8.8.8.8 izleme/erisim testleri)
-     * tarama sayilmaz. Sweep esigi 10 -> 20; flood ayri sayactadir ve
-     * esigi 100 -> 300 cekildi (monitoring araclari da ICMP uretir). */
+     * Ping sweep sayaci yalniz yerel (RFC1918) hedeflere beslenir; dis IP'lere
+     * tek tek ping (8.8.8.8 erisim testleri) tarama sayilmaz. Sweep esigi 20,
+     * flood esigi 300'dur (monitoring araclari da ICMP uretir). */
     if (pi->is_icmp) {
         if (ids_ip_is_private(pi->dst_ip)) {
             snprintf(key, sizeof(key), "I|%u", pi->src_ip);
@@ -3007,7 +2929,7 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                     ids_raise_alert("Ping Sweep", "ORTA", SCORE_ORTA, pi,
                                     "Tek kaynaktan cok sayida farkli yerel hedefe ICMP (ag kesfi)");
                 }
-                /* [DEĞİŞİKLİK 18] Yavas ping sweep: hedefler arasinda
+                /* Yavas ping sweep: hedefler arasinda
                  * sn'lerce beklenen ag kesfi (nmap -sn --max-rate 1). */
                 if (ids_tracker_long_scan(t)) {
                     char ldesc[160];
@@ -3038,7 +2960,7 @@ static void ids_check_rules(const IdsPktInfo *pi) {
         t = ids_tracker_get("B");
         if (t) {
             ids_tracker_bump(t, 0);
-            /* [DEĞİŞİKLİK 7] 150 -> 500: ARP/NetBIOS/mDNS gibi normal
+            /* 150 -> 500: ARP/NetBIOS/mDNS gibi normal
              * keşif protokolleri surekli broadcast uretir. */
             if (t->count >= 500 && ids_tracker_can_alert(t))
                 ids_raise_alert("Broadcast Storm", "ORTA", SCORE_ORTA, pi,
@@ -3052,9 +2974,8 @@ static void ids_check_rules(const IdsPktInfo *pi) {
 
 /* ==================================================================
  *   IZLEME KAPSAMI (scope) — gui.c'deki izleme listesinin motor kopyasi.
- *   BOS kapsam = hicbir paket islenmez (uyari, host/akis yok). Dolu
- *   kapsam = yalnizca listedeki IP'lere ait paketler islenir: IPv4 icin
- *   src/dst, ARP icin sender/target eslesmesi aranir.
+ *   Bos kapsam = hicbir paket islenmez; dolu kapsam = yalniz listedeki
+ *   IP'lere ait paketler islenir (IPv4 src/dst, ARP sender/target).
  * ================================================================== */
 #define IDS_SCOPE_IP_STR 16
 static char g_scope_ips[IDS_SCOPE_MAX][IDS_SCOPE_IP_STR];
@@ -3160,13 +3081,13 @@ void ids_init(void) {
 void ids_cleanup(void) {
     if (!g_ids_initialized) return;
     g_ids.running = 0;
-    /* [DEGISIKLIK 17] Port bitmap'leri malloc'lu: serbest birak. */
+    /* Port bitmap'leri malloc'lu: serbest birak. */
     for (int i = 0; i < g_tracker_count; i++) {
         if (g_trackers[i].unique_bits) {
             free(g_trackers[i].unique_bits);
             g_trackers[i].unique_bits = NULL;
         }
-        /* [DEGISIKLIK 18] uzun ufuk bitmap'i de serbest birakilir. */
+        /* uzun ufuk bitmap'i de serbest birakilir. */
         if (g_trackers[i].long_bits) {
             free(g_trackers[i].long_bits);
             g_trackers[i].long_bits = NULL;
@@ -3176,12 +3097,10 @@ void ids_cleanup(void) {
     g_ids_initialized = 0;
 }
 
-/* Lokal kaynakli (self) SYN taramasi: kendi makinenizden disariya yapilan
- * port taramalari (ornek nmap) genel kurallara takilmaz cunku self trafik
- * yanlis pozitifleri onlemek icin bastirilir. Bu kural yalnizca TCP SYN
- * paketlerini sayar; ayni kaynaktan cok sayida FARKLI hedef porta SYN
- * gidince uyari verir. Normal tarayici trafigi 2-3 porta dokunur,
- * cok sayida farkli porta dokunmadigi surece tetiklenmez. */
+/* Lokal kaynakli (self) SYN taramasi: kendi makinemizden disariya port
+ * taramasi genel kurallara takilmaz (self trafik FP onlemek icin bastirilir).
+ * Bu kural yalnizca TCP SYN sayar; ayni kaynaktan cok sayida FARKLI hedef
+ * porta SYN gidince uyarir. Normal tarayici 2-3 porta dokunur. */
 static void ids_check_local_scan(const IdsPktInfo *pi) {
     char key[64];
     IdsTracker *t;
@@ -3193,13 +3112,10 @@ static void ids_check_local_scan(const IdsPktInfo *pi) {
     if (t) {
         ids_tracker_bump_port(t, pi->dst_port);
         ids_tracker_long_bump(t, pi->dst_port);           /* [18] uzun ufuk */
-        /* DUZELTME (YANLIS NEGATIF): eski kosul t->count >= 16 idi. Gercek
-         * nmap taramalari ayni 10 sn penceresine 8 veya 15 farkli porta
-         * yalnizca 8/15 SYN biraktiginda (retransmit yok) kural hic
-         * tetiklenmiyordu -> dogrulanmis yanlis negatif. Ayirt edici sinyal
-         * "kac FARKLI porta" oldugu icin esik yalnizca unique_len uzerinde
-         * tutulur; count her zaman unique_len'den buyuk/esit oldugundan
-         * ayrica count esigi gereksiz ve zararlidir. */
+        /* Esik yalnizca unique_len uzerinde tutulur: retransmit'siz 8/15 SYN
+         * birakan nmap 'count >= 16' kosulunu saglayamiyordu (dogrulanmis
+         * yanlis negatif). count her zaman unique_len'den buyuktur; ayrica
+         * count esigi gereksiz ve zararlidir. */
         if (ids_tracker_unique(t) >= 8) {
             t->long_short_hit = 1;   /* [18] kisa pencere yakaladi */
             char desc[128];
@@ -3212,14 +3128,11 @@ static void ids_check_local_scan(const IdsPktInfo *pi) {
             ids_raise_or_update("Yerel Kaynakli Port Taramasi", "YUKSEK",
                                 SCORE_YUKSEK, pi, desc, 0, t);
         }
-        /* --- [DEĞİŞİKLİK 18] UZUN UFUK: yavaş (hız sınırlamalı) tarama ---
-         * Gerçek trafikte doğrulanan KAÇIŞ: `nmap --scan-delay 1.5s -p 1-30`
-         * ~45 sn sürer ve her 10 sn'lik pencereye en çok 7 farklı port
-         * bırakır; bu yüzden L| kuralı (8 farklı port) HİÇ tetiklenmiyordu
-         * — yani yavaşlatmak tespitten kaçmanın yolu haline gelmişti.
-         * Uzun ufuk, kısa pencere hiç tetiklenmediyse ve gözlem süresi
-         * min_span'i geçtiyse uyarır; hızlı patlamalar (zaten raporlanan)
-         * çift raporlanmaz. */
+        /* --- UZUN UFUK: yavas (hiz sinirlamali) tarama ---
+         * `nmap --scan-delay 1.5s` her kisa pencereye en cok 7 farkli port
+         * birakir; L| kurali (8 port) hic tetiklenmezdi — yavaslatmak kacmanin
+         * yolu olmustu. Uzun ufuk, kisa pencere tetiklenmediyse ve gozlem suresi
+         * min_span'i gectiyse uyarir; patlamalar cift raporlanmaz. */
         if (ids_tracker_long_scan(t)) {
             char ldesc[160];
             char ls[46];
@@ -3253,20 +3166,17 @@ void ids_process_packet(const PacketRecord *pkt) {
 
     int self_pkt = ids_is_self_originated(&pi);
 
-    /* [DEĞİŞİKLİK 14] Self SYN-ACK istisnası: kendi makinemizdeki
-     * dinleyicinin SYN-ACK cevapları self filtresine takılıyordu ve
-     * GERÇEK dinleme kanıtı (synack_seen) hiç toplanamıyordu; uyarı
-     * ancak karşı taraftan veri gelince dakikalar sonra çıkıyordu.
-     * SYN-ACK cevapları self olsa bile dinleme motoruna beslenir. */
+    /* Self SYN-ACK istisnasi: kendi dinleyicimizin SYN-ACK cevaplari self
+     * filtresine takilip synack_seen kaniti toplanamiyor, uyari dakikalar
+     * sonra karsi taraftan veri gelince cikiyordu. SYN-ACK'ler self olsa bile
+     * dinleme motoruna beslenir. */
     if (self_pkt && pi.is_tcp && ((pi.tcp_flags & 0x12) == 0x12))
         ids_malport_feed(&pi);
 
     /* Kendi urettigimiz trafik genel kurallari tetiklemesin: otomatik
-     * ARP/ping taramasi (pcap kendi cercevelerini de gorur) ve fallback
-     * modun sentetik cerceveleri Broadcast Storm / Ping Sweep / SYN tarama
-     * kurallarini tetikleyip Uyarilar sekmesini dolduruyordu. Ancak
-     * disariya yaptigimiz port taramalari da tespit edilsin istiyoruz;
-     * bu yuzden self trafikte yalnizca ids_check_local_scan() calisir. */
+     * ARP/ping taramasi ve fallback sentetik cerceveler alarm tablosunu
+     * dolduruyordu; ama disariya yaptigimiz taramalar da tespit edilsin —
+     * self trafikte yalnizca ids_check_local_scan() calisir. */
     if (self_pkt) {
         ids_check_local_scan(&pi);
         return;
